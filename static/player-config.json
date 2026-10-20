@@ -1,0 +1,60 @@
+{
+  "api_base_on_pages": "https://automatic-stream-capture.onrender.com",
+  "pages_host_suffix": "github.io",
+  "poll_ms": 2000,
+  "status_every_ticks": 8,
+  "keepalive_ms": 240000,
+  "ctrl_hide_ms": 3000,
+  "last_stream_max_age_hours": 6,
+  "bad_hosts_max": 20,
+  "buffer_target_s": 10,
+  "fit_labels": {
+    "contain": "Fit",
+    "cover": "Crop",
+    "fill": "Stretch"
+  },
+  "stage_progress": {
+    "launching_chrome": 10,
+    "chrome_started": 25,
+    "opening_page": 40,
+    "page_loaded": 55,
+    "waiting_for_stream": 70,
+    "stream_found": 95
+  },
+  "stage_labels": {
+    "launching_chrome": "Starting browser",
+    "chrome_started": "Browser ready",
+    "opening_page": "Opening page",
+    "page_loaded": "Page loaded, looking for the stream",
+    "waiting_for_stream": "Waiting for the stream",
+    "stream_found": "Stream found, loading"
+  },
+  "messages": {
+    "waking_server": "Server is waking up (free plan, can take a minute)…",
+    "paste_hint": "Paste a page or .m3u8 link below.",
+    "waiting_next": "Waiting for the next capture…",
+    "no_stream": "No stream found.",
+    "cannot_play_hls": "This browser cannot play HLS.",
+    "reconnecting": "Reconnecting to a fresh stream…",
+    "stream_set": "Stream set",
+    "capture_started": "Capture started",
+    "copied": "Stream link copied",
+    "copy_failed": "Copy failed",
+    "no_stream_yet": "No stream yet",
+    "live_toast": "Live edge",
+    "rotate_hint": "Turn your phone sideways for a full view",
+    "buffer": "Buffer",
+    "loading": "Loading",
+    "updated": "updated",
+    "pill": {
+      "ready": "Ready",
+      "idle": "Idle",
+      "capturing": "Capturing",
+      "loading": "Loading",
+      "live": "Live",
+      "no_stream": "No stream",
+      "waking": "Waking server",
+      "offline": "Offline"
+    }
+  }
+}

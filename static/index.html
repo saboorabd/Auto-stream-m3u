@@ -1,0 +1,814 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#06080d">
+<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+<link rel="preconnect" href="https://automatic-stream-capture.onrender.com" crossorigin>
+<title>Stream</title>
+<style>
+  :root {
+    --bg: #06080d; --glass: rgba(16,22,36,.72); --glass-line: rgba(255,255,255,.08);
+    --card: #0e1420; --card-2: #141d2e; --line: #1d2940;
+    --text: #eef3ff; --mute: #8a97b6;
+    --a1: #5eead4; --a2: #a78bfa; --ok: #34d399; --warn: #fbbf24; --err: #f87171; --live: #fb3c6a;
+    --ease: cubic-bezier(.2,.8,.2,1);
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; display: flex; flex-direction: column; color: var(--text);
+    background:
+      radial-gradient(900px 500px at 0% -10%, rgba(94,234,212,.07), transparent 60%),
+      radial-gradient(800px 500px at 100% 0%, rgba(167,139,250,.09), transparent 55%),
+      var(--bg);
+    font: 15px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom);
+    -webkit-tap-highlight-color: transparent;
+  }
+  .hide { display: none !important; }
+
+  /* top bar */
+  .top { display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    max-width: 1100px; width: 100%; margin: 0 auto; padding: 12px 14px 6px; }
+  .brand { display: flex; align-items: center; gap: 8px; font-weight: 800; letter-spacing: .04em; }
+  .brand .dot { width: 10px; height: 10px; border-radius: 50%;
+    background: linear-gradient(135deg, var(--a1), var(--a2)); box-shadow: 0 0 12px rgba(94,234,212,.6); }
+  .top-right { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .chip { font-size: 12px; padding: 5px 11px; border-radius: 999px; background: var(--card);
+    border: 1px solid var(--line); color: var(--mute); white-space: nowrap; }
+  .pill.ok { color: var(--ok); border-color: #1d5a48; }
+  .pill.warn { color: var(--warn); border-color: #5a4a1d; }
+  .pill.err { color: var(--err); border-color: #5a2424; }
+
+  main { width: 100%; max-width: 1100px; margin: 0 auto; padding: 0 12px; }
+  .bar { height: 3px; margin: 4px 0 10px; background: var(--card-2); border-radius: 4px; overflow: hidden; }
+  .bar i { display: block; height: 100%; width: 0;
+    background: linear-gradient(90deg, var(--a1), var(--a2)); box-shadow: 0 0 10px rgba(167,139,250,.6);
+    transition: width .5s var(--ease); }
+
+  /* stage */
+  .stage { position: relative; width: 100%; aspect-ratio: 16 / 9; background: #000;
+    border-radius: 20px; overflow: hidden; border: 1px solid var(--line);
+    box-shadow: 0 24px 60px rgba(0,0,0,.5); touch-action: manipulation; }
+  .stage:fullscreen, .stage:-webkit-full-screen { border-radius: 0; border: 0; aspect-ratio: auto; height: 100%; }
+  video { width: 100%; height: 100%; display: block; background: #000; }
+
+  .overlay { position: absolute; inset: 0; z-index: 1; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 12px; padding: 24px; text-align: center;
+    background: radial-gradient(circle at 50% 40%, #16223a, #03050a 75%); pointer-events: none; }
+  .overlay.hide { display: none; }
+  .spinner { width: 40px; height: 40px; border-radius: 50%; border: 3px solid #223050;
+    border-top-color: var(--a1); border-right-color: var(--a2); animation: spin .9s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .pct { font-size: 34px; font-weight: 800; letter-spacing: .02em;
+    background: linear-gradient(90deg, var(--a1), var(--a2)); -webkit-background-clip: text;
+    background-clip: text; color: transparent; font-variant-numeric: tabular-nums; }
+  .pct:empty { display: none; }
+  .msg { max-width: 460px; font-size: 14px; color: var(--mute); word-break: break-word; }
+  .msg.err { color: var(--err); }
+
+  /* big centre play button */
+  .big { position: absolute; left: 50%; top: 50%; z-index: 2; width: 84px; height: 84px;
+    margin: -42px 0 0 -42px; border: 0; border-radius: 50%; display: grid; place-items: center; cursor: pointer;
+    color: #fff; background: rgba(255,255,255,.14); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+    border: 1px solid rgba(255,255,255,.22); box-shadow: 0 14px 40px rgba(0,0,0,.45);
+    opacity: 0; transform: scale(.85); pointer-events: none;
+    transition: opacity .25s var(--ease), transform .25s var(--ease); }
+  .big svg { width: 38px; height: 38px; margin-left: 4px; }
+  .stage.paused .big { opacity: 1; transform: scale(1); pointer-events: auto; animation: ring 2.4s ease-out infinite; }
+  .big:active { transform: scale(.92); }
+  @keyframes ring {
+    0% { box-shadow: 0 0 0 0 rgba(94,234,212,.45), 0 14px 40px rgba(0,0,0,.45); }
+    70% { box-shadow: 0 0 0 22px rgba(94,234,212,0), 0 14px 40px rgba(0,0,0,.45); }
+    100% { box-shadow: 0 0 0 0 rgba(94,234,212,0), 0 14px 40px rgba(0,0,0,.45); }
+  }
+
+  /* control bar */
+  .ctrl { position: absolute; left: 0; right: 0; bottom: 0; z-index: 3; padding: 44px 12px 12px;
+    background: linear-gradient(transparent, rgba(3,5,10,.9) 60%);
+    opacity: 0; transition: opacity .3s var(--ease); pointer-events: none; }
+  .stage.show-ctrl .ctrl, .stage.paused .ctrl { opacity: 1; pointer-events: auto; }
+  .seekrow { margin-bottom: 10px; }
+  .bottom { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 6px 8px;
+    border-radius: 18px; background: var(--glass); border: 1px solid var(--glass-line);
+    backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); }
+
+  .btn { width: 38px; height: 38px; display: grid; place-items: center; flex: 0 0 auto; background: transparent;
+    color: #fff; border: 0; border-radius: 12px; cursor: pointer; transition: background .2s var(--ease), transform .15s var(--ease); }
+  .btn svg { width: 20px; height: 20px; }
+  .btn:hover { background: rgba(255,255,255,.08); }
+  .btn:active { transform: scale(.92); }
+  .btn.round { width: 44px; height: 44px; border-radius: 50%; color: #06101f;
+    background: linear-gradient(135deg, var(--a1), var(--a2)); box-shadow: 0 6px 18px rgba(94,234,212,.25); }
+  .btn.round svg { width: 22px; height: 22px; }
+  .btn.round:hover { background: linear-gradient(135deg, var(--a1), var(--a2)); filter: brightness(1.08); }
+
+  .pillbtn { height: 34px; padding: 0 12px; border-radius: 999px; cursor: pointer; flex: 0 0 auto;
+    background: rgba(255,255,255,.07); color: #fff; border: 1px solid rgba(255,255,255,.1);
+    font-size: 12.5px; font-weight: 600; letter-spacing: .02em; transition: background .2s var(--ease), transform .15s var(--ease); }
+  .pillbtn:hover { background: rgba(255,255,255,.14); }
+  .pillbtn:active { transform: scale(.96); }
+  .golive { border-color: var(--a1); color: var(--a1); }
+  .sel { height: 34px; padding: 0 10px; border-radius: 999px; flex: 0 0 auto; background: rgba(255,255,255,.07);
+    color: #fff; border: 1px solid rgba(255,255,255,.1); font-size: 12.5px; font-weight: 600; outline: none; cursor: pointer; }
+  .sel option { background: #101826; color: #fff; }
+
+  .vol { display: flex; align-items: center; gap: 2px; flex: 0 0 auto; }
+  .vol-range { width: 0; opacity: 0; transition: width .3s var(--ease), opacity .3s var(--ease); }
+  .vol:hover .vol-range, .vol:focus-within .vol-range { width: 84px; opacity: 1; }
+
+  .time { font-size: 12.5px; white-space: nowrap; font-variant-numeric: tabular-nums; padding: 0 4px; opacity: .9; }
+  .spacer { flex: 1; min-width: 4px; }
+  .live { font-size: 10.5px; font-weight: 800; color: #fff; background: var(--live); padding: 4px 9px;
+    border-radius: 6px; letter-spacing: .12em; box-shadow: 0 0 14px rgba(251,60,106,.55);
+    animation: livepulse 1.8s ease-in-out infinite; }
+  @keyframes livepulse { 50% { box-shadow: 0 0 4px rgba(251,60,106,.2); } }
+
+  .range { -webkit-appearance: none; appearance: none; width: 100%; height: 6px; border-radius: 6px; margin: 0;
+    background: linear-gradient(90deg, var(--a1), var(--a2)) 0 / var(--fill, 0%) 100% no-repeat, #2a3550;
+    outline: none; cursor: pointer; }
+  .range::-webkit-slider-thumb { -webkit-appearance: none; width: 14px; height: 14px; border-radius: 50%;
+    background: #fff; border: 0; box-shadow: 0 0 0 4px rgba(94,234,212,.18), 0 0 12px rgba(94,234,212,.7);
+    transition: transform .15s var(--ease); }
+  .range:active::-webkit-slider-thumb { transform: scale(1.25); }
+  .range::-moz-range-thumb { width: 14px; height: 14px; border: 0; border-radius: 50%; background: #fff;
+    box-shadow: 0 0 12px rgba(94,234,212,.7); }
+
+  /* bottom dock */
+  .dock { margin-top: auto; padding: 14px 12px 18px; }
+  form { display: flex; gap: 8px; max-width: 1100px; margin: 0 auto; }
+  input[type=text] { flex: 1; min-width: 0; padding: 14px 16px; border-radius: 16px; border: 1px solid var(--line);
+    background: var(--card); color: var(--text); font-size: 16px; outline: none;
+    transition: border-color .2s var(--ease), box-shadow .2s var(--ease); }
+  input[type=text]:focus { border-color: var(--a2); box-shadow: 0 0 0 3px rgba(167,139,250,.15); }
+  button.go { padding: 0 22px; border: 0; border-radius: 16px; cursor: pointer; color: #06101f;
+    background: linear-gradient(135deg, var(--a1), var(--a2)); font-weight: 800; font-size: 15px;
+    transition: transform .15s var(--ease), filter .2s var(--ease); }
+  button.go:active { transform: scale(.96); }
+  button.go:disabled { opacity: .5; }
+  .tools { display: flex; align-items: center; justify-content: center; gap: 10px; margin: 10px auto 0;
+    max-width: 1100px; min-height: 30px; flex-wrap: wrap; }
+  .ghost { background: transparent; border: 1px solid var(--line); color: var(--mute); font-weight: 500;
+    font-size: 13px; padding: 7px 12px; border-radius: 12px; cursor: pointer; }
+
+  .toast { position: fixed; left: 50%; bottom: 140px; transform: translateX(-50%); background: var(--card-2);
+    border: 1px solid var(--line); padding: 10px 16px; border-radius: 12px; font-size: 14px; opacity: 0;
+    transition: opacity .25s var(--ease); pointer-events: none; white-space: nowrap; box-shadow: 0 10px 30px rgba(0,0,0,.4); }
+  .toast.show { opacity: 1; }
+
+  /* phones: compact so nothing overflows */
+  @media (max-width: 560px) {
+    .top { padding: 10px 12px 4px; }
+    .chip { font-size: 11px; padding: 4px 9px; }
+    .stage { border-radius: 14px; }
+    .big { width: 64px; height: 64px; margin: -32px 0 0 -32px; }
+    .big svg { width: 28px; height: 28px; }
+    .ctrl { padding: 28px 6px 6px; }
+    .seekrow { margin-bottom: 6px; }
+    .bottom { gap: 4px; padding: 4px 5px; border-radius: 14px; }
+    .btn { width: 32px; height: 32px; border-radius: 10px; }
+    .btn svg { width: 18px; height: 18px; }
+    .btn.round { width: 36px; height: 36px; }
+    .btn.round svg { width: 18px; height: 18px; }
+    .pillbtn, .sel { height: 30px; padding: 0 8px; font-size: 11.5px; }
+    .vol-range { width: 52px; opacity: 1; }
+    .vol:hover .vol-range { width: 52px; }
+    .time { font-size: 11px; padding: 0 2px; }
+    .live { font-size: 9.5px; padding: 3px 6px; }
+    .spacer { display: none; }
+    .dock { padding: 10px 10px 14px; }
+    input[type=text] { padding: 12px 14px; }
+    button.go { padding: 0 16px; }
+  }
+</style>
+</head>
+<body>
+  <header class="top">
+    <div class="brand"><span class="dot"></span>Stream</div>
+    <div class="top-right">
+      <span id="buf" class="chip hide"></span>
+      <span id="pill" class="chip pill">Connecting</span>
+    </div>
+  </header>
+
+  <main>
+    <div class="bar"><i id="progress"></i></div>
+
+    <div id="stage" class="stage">
+      <video id="v" playsinline muted autoplay></video>
+
+      <button id="big" class="big" type="button" aria-label="Play">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z" fill="currentColor"/></svg>
+      </button>
+
+      <div id="overlay" class="overlay">
+        <div id="spin" class="spinner"></div>
+        <div id="pct" class="pct"></div>
+        <div id="msg" class="msg">Connecting…</div>
+      </div>
+
+      <div class="ctrl">
+        <div class="seekrow">
+          <input id="seek" class="range" type="range" min="0" max="1000" value="0" aria-label="Seek">
+        </div>
+        <div class="bottom">
+          <button id="play" class="btn round" type="button" aria-label="Play or pause">
+            <svg id="playIcon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z" fill="currentColor"/></svg>
+          </button>
+
+          <div class="vol">
+            <button id="mute" class="btn" type="button" aria-label="Sound on or off">
+              <svg id="volIcon" viewBox="0 0 24 24" aria-hidden="true"></svg>
+            </button>
+            <input id="vol" class="range vol-range" type="range" min="0" max="100" value="100" aria-label="Volume">
+          </div>
+
+          <span id="live" class="live hide">LIVE</span>
+          <button id="golive" class="pillbtn golive hide" type="button">Go live</button>
+          <span id="time" class="time">0:00 / 0:00</span>
+
+          <span class="spacer"></span>
+
+          <select id="quality" class="sel" aria-label="Quality"><option value="-1">Auto</option></select>
+          <button id="fit" class="pillbtn" type="button" aria-label="Fit, crop or stretch">Fit</button>
+          <button id="fs" class="btn" type="button" aria-label="Fullscreen">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <div class="dock">
+    <form id="form" autocomplete="off">
+      <input id="src" type="text" inputmode="url" placeholder="Page URL or .m3u8 link" required>
+      <button id="go" class="go" type="submit">Go</button>
+    </form>
+    <div class="tools">
+      <button id="copy" class="ghost" type="button">Copy stream link</button>
+      <span id="age" class="chip hide"></span>
+    </div>
+  </div>
+
+  <div id="toast" class="toast"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js"></script>
+<script>
+(() => {
+  'use strict';
+
+  // ---------- settings (edit here) ----------
+  const SERVER = 'https://automatic-stream-capture.onrender.com';
+  const API = location.hostname.endsWith('github.io') ? SERVER : '';
+  const POLL_MS = 2000;
+  const STATUS_EVERY = 8;            // status check every 8 polls while no stream is playing
+  const KEEPALIVE_MS = 240000;       // ping server every 4 min while the page is open
+  const CTRL_HIDE_MS = 3000;
+  const LAST_MAX_MS = 6 * 3600 * 1000;
+  const BUFFER_VOD_S = 10;
+  const BUFFER_LIVE_S = 6;
+  const BAD_HOSTS_MAX = 20;
+
+  const FIT = ['contain', 'cover', 'fill'];
+  const FIT_LABEL = { contain: 'Fit', cover: 'Crop', fill: 'Stretch' };
+  const STAGE_PCT = { launching_chrome: 10, chrome_started: 25, opening_page: 40, page_loaded: 55, waiting_for_stream: 70, stream_found: 95 };
+  const STAGE_TEXT = {
+    launching_chrome: 'Starting browser', chrome_started: 'Browser ready',
+    opening_page: 'Opening page', page_loaded: 'Page loaded, looking for the stream',
+    waiting_for_stream: 'Waiting for the stream', stream_found: 'Stream found, loading',
+  };
+  const TEXT = {
+    waking: 'Server is waking up (free plan, can take a minute)…',
+    hint: 'Paste a page or .m3u8 link below.',
+    waiting: 'Waiting for the next capture…',
+    noStream: 'No stream found.',
+    noHls: 'This browser cannot play HLS.',
+    reconnect: 'Reconnecting to a fresh stream…',
+    setOk: 'Stream set', capOk: 'Capture started', copied: 'Stream link copied',
+    copyFail: 'Copy failed', noLink: 'No stream yet', liveToast: 'Live edge',
+    rotate: 'Turn your phone sideways for a full view', updated: 'updated',
+  };
+  const ICON = {
+    play: '<path d="M8 5v14l11-7z" fill="currentColor"/>',
+    pause: '<path d="M7 5h4v14H7zM13 5h4v14h-4z" fill="currentColor"/>',
+    vol: '<path d="M4 9h4l5-4v14l-5-4H4z" fill="currentColor"/><path d="M16 9a4 4 0 0 1 0 6M18.5 6.5a7.5 7.5 0 0 1 0 11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>',
+    mute: '<path d="M4 9h4l5-4v14l-5-4H4z" fill="currentColor"/><path d="M16 9l5 6M21 9l-5 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>',
+  };
+  const KEY = { last: 'stream:last', bad: 'stream:bad', fit: 'stream:fit', vol: 'stream:volume' };
+  const M3U8 = /\.m3u8(\?|#|$)/i;
+
+  // ---------- elements ----------
+  const $ = (id) => document.getElementById(id);
+  const el = {
+    stage: $('stage'), video: $('v'), overlay: $('overlay'), msg: $('msg'), pct: $('pct'), spin: $('spin'),
+    pill: $('pill'), buf: $('buf'), bar: $('progress'), form: $('form'), src: $('src'), go: $('go'),
+    copy: $('copy'), age: $('age'), toast: $('toast'), big: $('big'), play: $('play'), playIcon: $('playIcon'),
+    seek: $('seek'), live: $('live'), golive: $('golive'), time: $('time'), mute: $('mute'), volIcon: $('volIcon'),
+    vol: $('vol'), quality: $('quality'), fit: $('fit'), fs: $('fs'),
+  };
+  const video = el.video;
+
+  // ---------- state ----------
+  let hls = null;
+  let rawUrl = null;      // stream currently playing (direct link)
+  let proxyUrl = null;    // same stream through the server proxy
+  let usingProxy = false;
+  let fragOk = false;
+  let netRetries = 0;
+  let pollTick = 0;
+  let seeking = false;
+  let isLive = false;
+  let hideTimer = null;
+  let fitIdx = 0;
+
+  // ---------- small helpers ----------
+  const setIcon = (node, paths) => { if (node) node.innerHTML = paths; };
+  const paint = (input, ratio) => input.style.setProperty('--fill', Math.round(ratio * 100) + '%');
+
+  function toast(text, ms = 1600) {
+    el.toast.textContent = text;
+    el.toast.classList.add('show');
+    clearTimeout(toast.t);
+    toast.t = setTimeout(() => el.toast.classList.remove('show'), ms);
+  }
+
+  function setPill(kind, text) {
+    el.pill.className = 'chip pill ' + kind;
+    el.pill.textContent = text;
+  }
+
+  function showOverlay(text, isError = false, percent = null) {
+    el.overlay.classList.remove('hide');
+    el.msg.textContent = text;
+    el.msg.className = 'msg' + (isError ? ' err' : '');
+    el.spin.style.display = isError ? 'none' : 'block';
+    el.pct.textContent = percent === null || isError ? '' : percent + '%';
+    updateUI();
+  }
+
+  function hideOverlay() {
+    el.overlay.classList.add('hide');
+    updateUI();
+  }
+
+  function fmt(sec) {
+    if (!isFinite(sec) || sec < 0) return '0:00';
+    const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = Math.floor(sec % 60);
+    const mm = h ? String(m).padStart(2, '0') : String(m);
+    return (h ? h + ':' : '') + mm + ':' + String(s).padStart(2, '0');
+  }
+
+  function ago(iso) {
+    const s = Math.max(0, (Date.now() - Date.parse(iso)) / 1000);
+    if (s < 60) return `${Math.floor(s)}s`;
+    if (s < 3600) return `${Math.floor(s / 60)}m`;
+    return `${Math.floor(s / 3600)}h`;
+  }
+
+  function explain(text) {
+    try { const d = JSON.parse(text); return d.diagnosis || text; } catch (_) { return text || TEXT.noStream; }
+  }
+
+  function readJSON(key, fallback) {
+    try {
+      const v = JSON.parse(localStorage.getItem(key));
+      return v === null || v === undefined ? fallback : v;
+    } catch (_) { return fallback; }
+  }
+
+  function writeJSON(key, value) {
+    try { localStorage.setItem(key, JSON.stringify(value)); } catch (_) { /* storage blocked */ }
+  }
+
+  const hostOf = (url) => { try { return new URL(url).host; } catch (_) { return ''; } };
+  const directBlocked = (url) => readJSON(KEY.bad, []).includes(hostOf(url));
+
+  function markDirectBlocked(url) {
+    const host = hostOf(url);
+    const list = readJSON(KEY.bad, []);
+    if (host && !list.includes(host)) {
+      list.push(host);
+      writeJSON(KEY.bad, list.slice(-BAD_HOSTS_MAX));
+    }
+  }
+
+  function saveLast(url, proxy) { writeJSON(KEY.last, { url, proxy, t: Date.now() }); }
+
+  function loadLast() {
+    const v = readJSON(KEY.last, null);
+    return v && v.url && Date.now() - v.t < LAST_MAX_MS ? v : null;
+  }
+
+  // ---------- one place that keeps every control in sync ----------
+  function updateUI() {
+    const playing = !video.paused && !video.ended;
+    setIcon(el.playIcon, playing ? ICON.pause : ICON.play);
+    el.stage.classList.toggle('playing', playing);
+    const overlayShown = !el.overlay.classList.contains('hide');
+    el.stage.classList.toggle('paused', !playing && !overlayShown && !!rawUrl);
+    updateVolume();
+  }
+
+  function updateVolume() {
+    const off = video.muted || video.volume === 0;
+    setIcon(el.volIcon, off ? ICON.mute : ICON.vol);
+    const level = video.muted ? 0 : video.volume;
+    el.vol.value = String(Math.round(level * 100));
+    paint(el.vol, level);
+  }
+
+  // ---------- buffer: seconds loaded ahead of the playhead ----------
+  function bufferSeconds() {
+    const t = video.currentTime, b = video.buffered;
+    for (let i = 0; i < b.length; i++) {
+      if (t >= b.start(i) - 0.25 && t <= b.end(i) + 0.25) return Math.max(0, b.end(i) - t);
+    }
+    return 0;
+  }
+
+  function updateBuffer() {
+    if (!rawUrl || video.readyState < 2) { el.buf.classList.add('hide'); return; }
+    const target = isLive ? BUFFER_LIVE_S : BUFFER_VOD_S;
+    const secs = bufferSeconds();
+    const percent = Math.min(100, Math.round((secs / target) * 100));
+    el.buf.classList.remove('hide');
+    el.buf.textContent = `Buffer ${percent}% · ${secs.toFixed(1)}s`;
+  }
+
+  // ---------- play / pause ----------
+  function togglePlay() {
+    if (video.paused) video.play().catch(() => {});
+    else video.pause();
+  }
+
+  el.big.addEventListener('click', (e) => { e.stopPropagation(); togglePlay(); });
+  el.play.addEventListener('click', togglePlay);
+  video.addEventListener('play', () => { updateUI(); showControls(); });
+  video.addEventListener('playing', updateUI);
+  video.addEventListener('pause', () => { updateUI(); showControls(); });
+  video.addEventListener('ended', updateUI);
+
+  // ---------- volume + mute ----------
+  el.mute.addEventListener('click', () => {
+    video.muted = !video.muted;
+    if (!video.muted && video.volume === 0) video.volume = 0.5;
+    writeJSON(KEY.vol, { volume: video.volume, muted: video.muted });
+    updateVolume();
+  });
+
+  el.vol.addEventListener('input', () => {
+    video.volume = Number(el.vol.value) / 100;
+    video.muted = video.volume === 0;
+    writeJSON(KEY.vol, { volume: video.volume, muted: video.muted });
+    updateVolume();
+  });
+
+  video.addEventListener('volumechange', updateVolume);
+
+  function restoreVolume() {
+    const saved = readJSON(KEY.vol, null);
+    if (saved && typeof saved.volume === 'number') video.volume = saved.volume;
+    // Browsers only allow sound after a tap, so the video starts muted.
+    video.muted = true;
+    updateVolume();
+  }
+
+  // ---------- fit ----------
+  function applyFit() {
+    video.style.objectFit = FIT[fitIdx];
+    el.fit.textContent = FIT_LABEL[FIT[fitIdx]];
+  }
+
+  el.fit.addEventListener('click', () => {
+    fitIdx = (fitIdx + 1) % FIT.length;
+    writeJSON(KEY.fit, FIT[fitIdx]);
+    applyFit();
+  });
+
+  // ---------- fullscreen + landscape ----------
+  async function enterFullscreen() {
+    try {
+      if (el.stage.requestFullscreen) {
+        await el.stage.requestFullscreen();
+        if (screen.orientation && screen.orientation.lock) await screen.orientation.lock('landscape');
+      } else if (video.webkitEnterFullscreen) {
+        video.webkitEnterFullscreen(); // iPhone: native fullscreen rotates itself
+      }
+    } catch (_) {
+      toast(TEXT.rotate, 2600);
+    }
+  }
+
+  function leaveFullscreen() {
+    try { if (screen.orientation && screen.orientation.unlock) screen.orientation.unlock(); } catch (_) { /* ignore */ }
+    if (document.fullscreenElement && document.exitFullscreen) document.exitFullscreen();
+    if (video.webkitDisplayingFullscreen && video.webkitExitFullscreen) video.webkitExitFullscreen();
+  }
+
+  el.fs.addEventListener('click', () => {
+    if (document.fullscreenElement || video.webkitDisplayingFullscreen) leaveFullscreen();
+    else enterFullscreen();
+  });
+
+  document.addEventListener('fullscreenchange', () => {
+    if (!document.fullscreenElement) {
+      try { if (screen.orientation && screen.orientation.unlock) screen.orientation.unlock(); } catch (_) { /* ignore */ }
+    }
+  });
+
+  // ---------- controls: show on tap, hide while playing ----------
+  function showControls() {
+    el.stage.classList.add('show-ctrl');
+    clearTimeout(hideTimer);
+    if (!video.paused) hideTimer = setTimeout(() => el.stage.classList.remove('show-ctrl'), CTRL_HIDE_MS);
+  }
+
+  // Tapping the picture only shows or hides the controls. It never pauses playback.
+  el.stage.addEventListener('click', (e) => {
+    if (e.target.closest('.ctrl, .big')) return;
+    if (el.stage.classList.contains('show-ctrl')) el.stage.classList.remove('show-ctrl');
+    else showControls();
+  });
+
+  function setLive(live) {
+    isLive = live;
+    el.live.classList.toggle('hide', !live);
+    el.golive.classList.toggle('hide', !live);
+    el.seek.classList.toggle('hide', live);
+    el.time.classList.toggle('hide', live);
+  }
+
+  function updateTime() {
+    const d = video.duration;
+    if (d === Infinity) { setLive(true); return; }
+    if (!isFinite(d) || isLive) return;
+    el.time.textContent = `${fmt(video.currentTime)} / ${fmt(d)}`;
+    const ratio = video.currentTime / d;
+    if (!seeking) {
+      el.seek.value = String(Math.round(ratio * 1000));
+      paint(el.seek, ratio);
+    }
+  }
+
+  el.seek.addEventListener('input', () => {
+    seeking = true;
+    paint(el.seek, Number(el.seek.value) / 1000);
+  });
+
+  el.seek.addEventListener('change', () => {
+    const d = video.duration;
+    if (isFinite(d)) video.currentTime = (Number(el.seek.value) / 1000) * d;
+    seeking = false;
+  });
+
+  el.golive.addEventListener('click', () => {
+    if (hls && hls.liveSyncPosition) video.currentTime = hls.liveSyncPosition;
+    else if (isFinite(video.duration)) video.currentTime = video.duration;
+    video.play().catch(() => {});
+    toast(TEXT.liveToast);
+  });
+
+  function fillQuality(inst) {
+    el.quality.innerHTML = '';
+    const add = (value, label) => {
+      const o = document.createElement('option');
+      o.value = value;
+      o.textContent = label;
+      el.quality.appendChild(o);
+    };
+    add('-1', 'Auto');
+    // One entry per resolution. If a resolution has several bitrates, keep the highest.
+    const best = new Map();
+    inst.levels.forEach((lvl, idx) => {
+      if (!lvl.height) return;
+      const cur = best.get(lvl.height);
+      if (cur === undefined || (lvl.bitrate || 0) > (inst.levels[cur].bitrate || 0)) best.set(lvl.height, idx);
+    });
+    [...best.keys()].sort((a, b) => b - a).forEach((h) => add(String(best.get(h)), h + 'p'));
+    el.quality.value = '-1';
+  }
+
+  el.quality.addEventListener('change', () => {
+    if (hls) hls.currentLevel = Number(el.quality.value);
+  });
+
+  video.addEventListener('timeupdate', () => { updateTime(); updateBuffer(); });
+  video.addEventListener('durationchange', updateTime);
+  video.addEventListener('progress', updateBuffer);
+
+  // ---------- playback ----------
+  function onHlsError(_e, d) {
+    if (!d.fatal) return;
+
+    if (d.type === Hls.ErrorTypes.NETWORK_ERROR) {
+      // Direct failed before any fragment loaded (usually CORS). Use the proxy from now on.
+      if (!usingProxy && proxyUrl) {
+        if (!fragOk) markDirectBlocked(rawUrl);
+        usingProxy = true;
+        fragOk = false;
+        netRetries = 0;
+        hls.loadSource(proxyUrl);
+        return;
+      }
+      netRetries += 1;
+      if (netRetries > 5) {
+        // Link is dead. Tell the server to reload its capture page, then wait for a fresh link.
+        rawUrl = null;
+        netRetries = 0;
+        showOverlay(TEXT.reconnect);
+        fetch(API + '/api/refresh', { method: 'POST' }).catch(() => {});
+        return;
+      }
+      hls.startLoad();
+    } else if (d.type === Hls.ErrorTypes.MEDIA_ERROR) {
+      hls.recoverMediaError();
+    } else {
+      showOverlay('Player error: ' + d.details, true);
+    }
+  }
+
+  function createHls() {
+    hls = new Hls({
+      enableWorker: true,
+      startLevel: 0,                  // fast first frame: start low, climb as bandwidth allows
+      capLevelToPlayerSize: true,
+      startFragPrefetch: true,
+      lowLatencyMode: true,
+      liveSyncDurationCount: 2,
+      liveMaxLatencyDurationCount: 6,
+      maxBufferLength: 8,
+      maxMaxBufferLength: 20,
+      backBufferLength: 10,
+      manifestLoadingTimeOut: 8000,
+      fragLoadingTimeOut: 15000,
+    });
+    hls.attachMedia(video);
+    hls.on(Hls.Events.MANIFEST_PARSED, () => {
+      fillQuality(hls);
+      hideOverlay();
+      video.play().catch(() => {});
+    });
+    hls.on(Hls.Events.LEVEL_LOADED, (_e, data) => setLive(!!data.details.live));
+    hls.on(Hls.Events.FRAG_LOADED, () => { fragOk = true; netRetries = 0; });
+    hls.on(Hls.Events.ERROR, onHlsError);
+  }
+
+  function attach(url) {
+    const hasHls = window.Hls && Hls.isSupported();
+    el.quality.classList.toggle('hide', !hasHls);
+
+    if (hasHls) {
+      if (!hls) createHls();
+      usingProxy = !!proxyUrl && directBlocked(url);  // known-blocked hosts skip the direct try
+      fragOk = false;
+      netRetries = 0;
+      hls.loadSource(usingProxy ? proxyUrl : url);
+    } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+      video.src = proxyUrl || url;          // iPhone Safari
+      video.play().catch(() => {});
+    } else {
+      showOverlay(TEXT.noHls, true);
+    }
+  }
+
+  function playStream(url, proxy) {
+    rawUrl = url;
+    proxyUrl = proxy && !proxy.startsWith('http') ? API + proxy : proxy;
+    hideOverlay();
+    setPill('ok', 'Live');
+    attach(url);
+    saveLast(url, proxyUrl);
+  }
+
+  // ---------- server sync ----------
+  async function keepAlive() {
+    try { await fetch(API + '/api/status?ka=' + Date.now(), { cache: 'no-store' }); } catch (_) { /* asleep or offline */ }
+  }
+
+  async function checkStream() {
+    try {
+      const res = await fetch(API + '/api/stream?t=' + Date.now(), { cache: 'no-store' });
+      if (res.status === 404) return;
+      const data = await res.json();
+      if (data.updated_at) {
+        el.age.textContent = `${TEXT.updated} ${ago(data.updated_at)} ago`;
+        el.age.classList.remove('hide');
+      }
+      if (data.url && data.url !== rawUrl) playStream(data.url, data.proxy_url);
+    } catch (_) { /* server waking up; next tick retries */ }
+  }
+
+  async function checkStatus() {
+    try {
+      const res = await fetch(API + '/api/status?t=' + Date.now(), { cache: 'no-store' });
+      const s = await res.json();
+      const name = (s.stage && s.stage.name) || 'idle';
+      if (rawUrl) return;
+
+      if (STAGE_TEXT[name]) {
+        const p = STAGE_PCT[name] || 0;
+        setPill('warn', 'Capturing');
+        el.bar.style.width = p + '%';
+        showOverlay(STAGE_TEXT[name] + '…', false, p);
+      } else if (name === 'timeout_no_stream') {
+        setPill('err', 'No stream');
+        el.bar.style.width = '0%';
+        showOverlay(explain(s.stage.error), true);
+      } else if (s.page_url) {
+        setPill('', 'Idle');
+        showOverlay(s.last_error ? explain(s.last_error) : TEXT.waiting);
+      } else {
+        setPill('', 'Ready');
+        showOverlay(TEXT.hint);
+      }
+    } catch (_) {
+      if (!rawUrl) {
+        setPill('warn', 'Waking server');
+        showOverlay(TEXT.waking);
+      }
+    }
+  }
+
+  // ---------- user input ----------
+  el.form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const value = el.src.value.trim();
+    if (!value) return;
+
+    const isStream = M3U8.test(value);
+    const body = isStream ? { stream_url: value } : { page_url: value };
+
+    el.go.disabled = true;
+    try {
+      const res = await fetch(API + '/api/target', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+
+      rawUrl = null;
+      proxyUrl = null;
+      el.src.value = '';
+      el.bar.style.width = '5%';
+      setPill('warn', isStream ? 'Loading' : 'Capturing');
+      showOverlay(isStream ? 'Loading stream…' : TEXT.capOk + '…', false, 5);
+      toast(isStream ? TEXT.setOk : TEXT.capOk);
+      checkStream();
+    } catch (err) {
+      toast('Failed: ' + err.message);
+    } finally {
+      el.go.disabled = false;
+    }
+  });
+
+  el.copy.addEventListener('click', async () => {
+    if (!proxyUrl) return toast(TEXT.noLink);
+    const link = proxyUrl.startsWith('http') ? proxyUrl : location.origin + proxyUrl;
+    try {
+      await navigator.clipboard.writeText(link);
+      toast(TEXT.copied);
+    } catch (_) {
+      toast(TEXT.copyFail);
+    }
+  });
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+      keepAlive();
+      checkStream();
+      checkStatus();
+    }
+  });
+
+  // ---------- start ----------
+  fitIdx = Math.max(0, FIT.indexOf(readJSON(KEY.fit, 'contain')));
+  applyFit();
+  restoreVolume();
+  updateUI();
+
+  // 1. Last known stream plays from cache immediately, before the server answers.
+  const last = loadLast();
+  if (last) playStream(last.url, last.proxy);
+
+  // 2. Then sync with the server in the background.
+  keepAlive();
+  checkStream();
+  checkStatus();
+  setInterval(keepAlive, KEEPALIVE_MS);
+  setInterval(() => {
+    checkStream();
+    pollTick += 1;
+    if (!rawUrl || pollTick >= STATUS_EVERY) {
+      pollTick = 0;
+      checkStatus();
+    }
+  }, POLL_MS);
+  setInterval(updateBuffer, 1000);
+})();
+</script>
+</body>
+</html>
