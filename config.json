@@ -1,0 +1,11 @@
+{
+  "page_url": "https://www.zee5.com/live-tv/zee-thirai-hd/0-9-224",
+  "channel_name": "My Stream",
+  "channel_id": "live1",
+  "play_selectors": ["button.play", "video", "[aria-label='Play']"],
+  "stream_pattern": "\\.m3u8(?:$|[?#])",
+  "capture_timeout_s": 60,
+  "refresh_interval_s": 5,
+  "reload_after_s": 300,
+  "headless": false
+}
