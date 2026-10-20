@@ -1,5 +1,5 @@
 """
-Stream Capture server (M3U edition with DASH, DRM support & Direct Auto-Redirect).
+Stream Capture server (M3U edition with DASH, DRM support & Direct Segment Routing).
 """
 
 import ipaddress
@@ -33,7 +33,6 @@ CFG = json.loads((BASE_DIR / "config.json").read_text(encoding="utf-8"))
 STREAM_RE = re.compile(r"\.(?:m3u8|mpd)(?:$|[?#])", re.IGNORECASE)
 PLAYER_FILES = {"player.js", "player-config.json", "player.css"}
 
-# Default to direct mode so cloud hosting doesn't block via proxy
 LIVE_MODE = os.environ.get("LIVE_MODE", "direct").strip().lower()
 if LIVE_MODE not in ("direct", "proxy"):
     LIVE_MODE = "direct"
@@ -126,6 +125,7 @@ def read_body(resp):
     return data.decode("utf-8", errors="replace")
 
 def rewrite_mpd(text, base_url):
+    """Rewrites DASH manifest segments: direct mode keeps CDN URLs, proxy mode routes through server."""
     base_query = urlparse(base_url).query
     base = base_url
     m = re.search(r"<BaseURL[^>]*>\s*([^<\s]+)\s*</BaseURL>", text)
@@ -138,6 +138,10 @@ def rewrite_mpd(text, base_url):
         parsed = urlparse(resolved)
         if base_query and not parsed.query:
             resolved = urlunparse(parsed._replace(query=base_query))
+        
+        # If direct mode is active, return absolute CDN URL directly to avoid Render proxy blocks (502)
+        if LIVE_MODE == "direct":
+            return resolved
         return "/proxy?url=" + quote(resolved, safe="$/:@!*~,;+")
 
     def repl(match):
@@ -352,10 +356,13 @@ def live_m3u8():
         return Response("Stream token expired, fetching a fresh one. Retry in ~5 seconds.",
                         status=503, headers={"Retry-After": "5"})
     
-    # Direct mode forces direct 302 redirect to CDN, avoiding Render 502 proxy block
-    target = url
+    if LIVE_MODE == "direct":
+        target = url
+    else:
+        target = "/proxy?url=" + quote(url, safe="")
+    
     resp = redirect(target, code=302)
-    resp.headers["Cache-Control"]- "no-cache, no-store"
+    resp.headers["Cache-Control"] = "no-cache, no-store"
     return resp
 
 @app.get("/api/keys")
