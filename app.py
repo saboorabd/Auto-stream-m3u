@@ -1,5 +1,5 @@
 """
-Stream Capture server (M3U edition with DASH, DRM support & Auto-Refresh).
+Stream Capture server (M3U edition with DASH, DRM support & Direct Auto-Redirect).
 """
 
 import ipaddress
@@ -33,6 +33,7 @@ CFG = json.loads((BASE_DIR / "config.json").read_text(encoding="utf-8"))
 STREAM_RE = re.compile(r"\.(?:m3u8|mpd)(?:$|[?#])", re.IGNORECASE)
 PLAYER_FILES = {"player.js", "player-config.json", "player.css"}
 
+# Default to direct mode so cloud hosting doesn't block via proxy
 LIVE_MODE = os.environ.get("LIVE_MODE", "direct").strip().lower()
 if LIVE_MODE not in ("direct", "proxy"):
     LIVE_MODE = "direct"
@@ -186,7 +187,7 @@ def capture_loop():
         with LOCK:
             if not STATE["url"] or (token_expired(STATE["url"]) and not STATE["manual_url"]):
                 STATE["url"] = None
-                sleep_time = 5  # Token illana seekaram adutha capture try pannum
+                sleep_time = 5
             else:
                 sleep_time = CFG.get("refresh_interval_s", 300)
 
@@ -350,12 +351,11 @@ def live_m3u8():
         WAKE.set()
         return Response("Stream token expired, fetching a fresh one. Retry in ~5 seconds.",
                         status=503, headers={"Retry-After": "5"})
-    if LIVE_MODE == "direct":
-        target = url
-    else:
-        target = "/proxy?url=" + quote(url, safe="")
+    
+    # Direct mode forces direct 302 redirect to CDN, avoiding Render 502 proxy block
+    target = url
     resp = redirect(target, code=302)
-    resp.headers["Cache-Control"] = "no-cache, no-store"
+    resp.headers["Cache-Control"]- "no-cache, no-store"
     return resp
 
 @app.get("/api/keys")
