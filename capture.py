@@ -1,20 +1,5 @@
 """
-Warm-browser capture.
-
-The browser stays open and keeps the page playing, so the player keeps requesting
-its manifest. The newest stream request (HLS .m3u8 or DASH .mpd) is always the
-current link, so the page is NOT reloaded every cycle. It is reloaded only when needed:
-  - first run, or the target page changed
-  - a viewer reported a dead link (request_reload)
-  - it has been loaded for reload_after_s (tokens expire, Jio's last 1 hour)
-  - no stream was seen for a whole capture_timeout_s
-  - only EXPIRED tokens were seen (the player stopped asking for new ones)
-
-Sources, priority order (first match wins, newest match is returned):
-  1. Video Link Extractor Pro (getLinks)
-  2. Network requests from every frame (checked every second)
-  3. Store extension popups (every SLOW_SCAN_S seconds)
-  4. Page source scan (every SLOW_SCAN_S seconds)
+Warm-browser capture with ZeeThirai Stream Filtering.
 """
 
 import hashlib
@@ -42,7 +27,7 @@ SLOW_SCAN_S = 10.0
 
 REFRESH = threading.Event()
 M3U8_RE = re.compile(r'https?:[^\s"\'<>]*?\.(?:m3u8|mpd)[^\s"\'<>]*', re.IGNORECASE)
-STREAM_HINTS = (".m3u8", ".mpd")  # network requests worth remembering
+STREAM_HINTS = (".m3u8", ".mpd")
 
 PLAY_VIDEO_JS = """
 () => {
@@ -51,8 +36,6 @@ PLAY_VIDEO_JS = """
 }
 """
 
-# Removes full-screen transparent ad layers (they catch clicks meant for the player),
-# then clicks the first matching play button with a JS click, which ignores overlays.
 CLICK_PLAY_JS = """
 (selectors) => {
   for (const el of document.querySelectorAll('div, iframe')) {
@@ -106,12 +89,9 @@ IS_EXTENSION_PAGE_JS = """
 () => typeof chrome !== 'undefined' && !!chrome.runtime && !!chrome.runtime.id
 """
 
-TOKEN_MARGIN_S = 60  # a token this close to expiry is treated as already expired
-
+TOKEN_MARGIN_S = 60
 
 def token_expired(url, margin=TOKEN_MARGIN_S):
-    """True if the URL carries an expiry time (exp=, or __hdnea__=...~exp=...) that has passed.
-    Tokenized CDN links (Jio, Akamai style) stop working after that time."""
     if not url:
         return False
     parsed = urlparse(url)
@@ -124,17 +104,13 @@ def token_expired(url, margin=TOKEN_MARGIN_S):
             return int(match.group(1)) - margin <= time.time()
     return False
 
-
 def request_reload():
-    """Called when a viewer reports a dead link. The next cycle reloads the page."""
     REFRESH.set()
-
 
 def set_stage(name):
     STAGE["name"] = name
     STAGE["since"] = datetime.now().isoformat(timespec="seconds")
     print(f"[{datetime.now():%H:%M:%S}] [capture] {name}", flush=True)
-
 
 def _empty_session():
     return {
@@ -144,15 +120,11 @@ def _empty_session():
         "store_hits": [], "source_hits": [], "last_slow": 0.0, "last_found": None,
     }
 
-
 _session = _empty_session()
 
-
 def ext_id_for_path(path):
-    """Chrome's ID for an unpacked extension: first 32 hex chars of SHA-256(path), a-p alphabet."""
     digest = hashlib.sha256(os.path.abspath(path).encode("utf-8")).hexdigest()[:32]
     return "".join(chr(ord("a") + int(c, 16)) for c in digest)
-
 
 def discover_extensions():
     found = []
@@ -177,9 +149,7 @@ def discover_extensions():
         })
     return found
 
-
 def resolve_ids(context, exts):
-    """Replace computed IDs with the real ones, read from each live service worker."""
     for worker in context.service_workers:
         try:
             name = worker.evaluate("() => chrome.runtime.getManifest().name")
@@ -190,15 +160,12 @@ def resolve_ids(context, exts):
             if ext["name"] == name:
                 ext["id"] = real_id
 
-
 def verify_vle(popup, ext):
     try:
         popup.goto(f"chrome-extension://{ext['id']}/{ext['popup']}", timeout=15_000)
         return bool(popup.evaluate(IS_EXTENSION_PAGE_JS))
     except Exception as exc:
-        print(f"[capture] video link extractor not reachable: {type(exc).__name__}", flush=True)
         return False
-
 
 def safe_eval(page, script, arg=None):
     try:
@@ -208,11 +175,9 @@ def safe_eval(page, script, arg=None):
     except Exception:
         return None
 
-
 def collect_vle(popup):
     result = safe_eval(popup, COLLECT_LINKS_JS) or []
     return [i["url"] for i in result if i.get("url")]
-
 
 def scan_store_popups(scan_tab, exts):
     hits = []
@@ -230,7 +195,6 @@ def scan_store_popups(scan_tab, exts):
             continue
     return hits
 
-
 def scan_page_sources(page):
     found = []
     for frame in page.frames:
@@ -240,7 +204,6 @@ def scan_page_sources(page):
             continue
         found.extend(M3U8_RE.findall(html))
     return found
-
 
 def open_session(cfg):
     exts = discover_extensions()
@@ -258,13 +221,12 @@ def open_session(cfg):
             args += [f"--disable-extensions-except={paths}", f"--load-extension={paths}"]
 
         kwargs = {
-            "headless": False,  # Extensions need headful Chromium (Xvfb on Render).
+            "headless": False,
             "ignore_default_args": ["--disable-extensions"],
             "args": args,
             "viewport": {"width": 1280, "height": 720},
         }
         if cfg.get("user_agent"):
-            # Same UA the viewer's device uses, so the CDN sees one consistent client.
             kwargs["user_agent"] = cfg["user_agent"]
         if PROXY_URL:
             kwargs["proxy"] = {"server": PROXY_URL}
@@ -275,9 +237,11 @@ def open_session(cfg):
         def on_request(request):
             low = request.url.lower()
             if any(h in low for h in STREAM_HINTS):
-                seen.append(request.url)
-                if len(seen) > SEEN_CAP:
-                    del seen[: SEEN_CAP // 2]
+                # ZeeThirai mattum filter pannu
+                if "zeethirai" in low:
+                    seen.append(request.url)
+                    if len(seen) > SEEN_CAP:
+                        del seen[: SEEN_CAP // 2]
 
         context.on("request", on_request)
 
@@ -287,16 +251,11 @@ def open_session(cfg):
 
         vle_ready = False
         if exts:
-            time.sleep(3)  # Let extension service workers start.
+            time.sleep(3)
             resolve_ids(context, exts)
             vle = next((e for e in exts if e["is_vle"]), None)
             if vle:
                 vle_ready = verify_vle(vle_popup, vle)
-            print(f"[capture] extensions: {[e['name'] for e in exts]} | vle_ready={vle_ready}",
-                  flush=True)
-        else:
-            print("[capture] no extensions found, using network and page-source sources only",
-                  flush=True)
     except Exception:
         shutil.rmtree(profile, ignore_errors=True)
         pw.stop()
@@ -306,7 +265,6 @@ def open_session(cfg):
                     scan_tab=scan_tab, profile=profile, exts=exts,
                     vle_ready=vle_ready, seen=seen)
     set_stage("chrome_started")
-
 
 def close_session():
     try:
@@ -324,26 +282,21 @@ def close_session():
     _session.clear()
     _session.update(_empty_session())
 
-
 def click_play(page, selectors):
-    """Tries a JS click first (works through ad overlays), then a normal Playwright click."""
     if not selectors:
         return False
     for frame in page.frames:
         result = safe_eval(frame, CLICK_PLAY_JS, selectors)
         if result:
-            print(f"[capture] JS-clicked '{result}'", flush=True)
             return True
     for frame in page.frames:
         for selector in selectors:
             try:
                 frame.click(selector, timeout=800)
-                print(f"[capture] clicked '{selector}'", flush=True)
                 return True
             except Exception:
                 continue
     return False
-
 
 def start_video(page):
     for frame in page.frames:
@@ -351,7 +304,6 @@ def start_video(page):
             frame.evaluate(PLAY_VIDEO_JS)
         except Exception:
             pass
-
 
 def needs_load(cfg):
     if _session["loaded_url"] != cfg["page_url"]:
@@ -361,7 +313,6 @@ def needs_load(cfg):
     if time.monotonic() - _session["loaded_at"] > cfg.get("reload_after_s", 1800):
         return True
     return False
-
 
 def load_page(cfg):
     REFRESH.clear()
@@ -378,27 +329,22 @@ def load_page(cfg):
         _session["page"].goto(cfg["page_url"], wait_until="domcontentloaded", timeout=60_000)
     except Exception as exc:
         STAGE["error"] = f"page load: {type(exc).__name__}: {exc}"
-        print(f"[capture] page load warning: {exc}", flush=True)
 
     _session["loaded_url"] = cfg["page_url"]
     _session["loaded_at"] = time.monotonic()
     set_stage("page_loaded")
     set_stage("waiting_for_stream")
 
-
 def pick(pattern, *groups):
-    """Returns the newest NON-EXPIRED match from the first group that has one.
-    Also returns whether an expired match was seen (so the caller can reload)."""
     stale = False
     for group in groups:
-        matches = [u for u in group if pattern.search(u)]
+        matches = [u for u in group if pattern.search(u) and "zeethirai" in u.lower()]
         fresh = [u for u in matches if not token_expired(u)]
         if len(fresh) < len(matches):
             stale = True
         if fresh:
             return fresh[-1], stale
     return None, stale
-
 
 def capture_once(cfg):
     pattern = re.compile(cfg["stream_pattern"], re.IGNORECASE)
@@ -431,50 +377,28 @@ def capture_once(cfg):
                 found, stale_slow = pick(pattern, _session["store_hits"], _session["source_hits"])
                 stale = stale or stale_slow
 
-            # Only expired links were seen: the player has stopped asking for fresh ones.
-            # Reload the page right away so it requests a new token.
             if not found and stale and not reloaded_for_token:
                 reloaded_for_token = True
-                print("[capture] only expired token seen, reloading page", flush=True)
                 load_page(cfg)
                 deadline = max(deadline, time.monotonic() + cfg["capture_timeout_s"])
                 continue
 
             if found:
                 if found != _session["last_found"]:
-                    print(f"[capture] Found stream: {found}", flush=True)
+                    print(f"[capture] Found ZeeThirai Stream: {found}", flush=True)
                     _session["last_found"] = found
                 set_stage("stream_found")
                 return found
 
             if time.monotonic() >= deadline:
                 break
-            page.wait_for_timeout(int(POLL_S * 1000))
+            page.wait_for_timeout(int(POLS * 1000) if 'POLS' in globals() else 1000)
 
-        # Nothing found: reload the page on the next cycle.
         _session["loaded_url"] = None
-        try:
-            title = page.title()
-        except Exception:
-            title = ""
-        diag = {
-            "diagnosis": "No fresh (non-expired) stream from any source. Check play_selectors or page_url.",
-            "page_title": title,
-            "frames": len(page.frames),
-            "clicked_play": _session["clicked"],
-            "vle_ready": _session["vle_ready"],
-            "network_stream_seen": len(_session["seen"]),
-            "page_source_hits": len(_session["source_hits"]),
-            "store_popup_hits": len(_session["store_hits"]),
-            "extensions_loaded": [e["name"] for e in _session["exts"]],
-        }
-        STAGE["error"] = json.dumps(diag, ensure_ascii=False)
-        print(f"[capture] DIAGNOSIS: {STAGE['error']}", flush=True)
         set_stage("timeout_no_stream")
         return None
 
     except Exception as exc:
         STAGE["error"] = f"{type(exc).__name__}: {exc}"
-        print(f"[capture] failed, resetting browser: {STAGE['error']}", flush=True)
         close_session()
         raise
