@@ -1,11 +1,18 @@
 {
   "page_url": "https://jjtvxweb.pages.dev/pind?id=3051",
-  "channel_name": "My Stream",
-  "channel_id": "live1",
+  "channel_name": "Zee Thirai HD",
+  "channel_id": "zeethirai",
   "referer": "https://jjtvxweb.pages.dev",
-  "user_agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36",
-  "play_selectors": [".shaka-big-play-button", ".shaka-play-button", "#player-container video", "video"],
-  "stream_pattern": "\\.(?:m3u8|mpd)(?:$|[?#])",
+  "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+  "play_selectors": [
+    "video",
+    "#player-container",
+    ".shaka-play-button",
+    ".shaka-big-play-button",
+    "div[class*='play']",
+    "button[class*='play']"
+  ],
+  "stream_pattern": "ZeeThiraiHD_BTS.*\\.(?:m3u8|mpd)",
   "capture_timeout_s": 60,
   "refresh_interval_s": 5,
   "reload_after_s": 1800,
