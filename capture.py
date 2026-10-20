@@ -2,11 +2,11 @@
 Warm-browser capture.
 
 The browser stays open and keeps the page playing, so the player keeps requesting
-its playlist. The newest .m3u8 request is always the current link, so the page
-is NOT reloaded every cycle. It is reloaded only when needed:
+its manifest. The newest stream request (HLS .m3u8 or DASH .mpd) is always the
+current link, so the page is NOT reloaded every cycle. It is reloaded only when needed:
   - first run, or the target page changed
   - a viewer reported a dead link (request_reload)
-  - it has been loaded for reload_after_s (signed links expire)
+  - it has been loaded for reload_after_s (tokens expire, Jio's last 1 hour)
   - no stream was seen for a whole capture_timeout_s
   - only EXPIRED tokens were seen (the player stopped asking for new ones)
 
@@ -41,12 +41,32 @@ POLL_S = 1.0
 SLOW_SCAN_S = 10.0
 
 REFRESH = threading.Event()
-M3U8_RE = re.compile(r'https?:[^\s"\'<>]*?\.m3u8[^\s"\'<>]*', re.IGNORECASE)
+M3U8_RE = re.compile(r'https?:[^\s"\'<>]*?\.(?:m3u8|mpd)[^\s"\'<>]*', re.IGNORECASE)
+STREAM_HINTS = (".m3u8", ".mpd")  # network requests worth remembering
 
 PLAY_VIDEO_JS = """
 () => {
   const v = document.querySelector('video');
   if (v) { v.muted = true; v.play().catch(() => {}); }
+}
+"""
+
+# Removes full-screen transparent ad layers (they catch clicks meant for the player),
+# then clicks the first matching play button with a JS click, which ignores overlays.
+CLICK_PLAY_JS = """
+(selectors) => {
+  for (const el of document.querySelectorAll('div, iframe')) {
+    const s = getComputedStyle(el);
+    if (s.position === 'fixed' && parseFloat(s.opacity) < 0.1
+        && el.offsetWidth > 200 && el.offsetHeight > 200) {
+      el.remove();
+    }
+  }
+  for (const sel of selectors) {
+    const el = document.querySelector(sel);
+    if (el) { el.click(); return sel; }
+  }
+  return null;
 }
 """
 
@@ -180,9 +200,11 @@ def verify_vle(popup, ext):
         return False
 
 
-def safe_eval(page, script):
+def safe_eval(page, script, arg=None):
     try:
-        return page.evaluate(script)
+        if arg is None:
+            return page.evaluate(script)
+        return page.evaluate(script, arg)
     except Exception:
         return None
 
@@ -220,7 +242,7 @@ def scan_page_sources(page):
     return found
 
 
-def open_session():
+def open_session(cfg):
     exts = discover_extensions()
     profile = tempfile.mkdtemp(prefix="vle-")
     pw = sync_playwright().start()
@@ -241,6 +263,9 @@ def open_session():
             "args": args,
             "viewport": {"width": 1280, "height": 720},
         }
+        if cfg.get("user_agent"):
+            # Same UA the viewer's device uses, so the CDN sees one consistent client.
+            kwargs["user_agent"] = cfg["user_agent"]
         if PROXY_URL:
             kwargs["proxy"] = {"server": PROXY_URL}
 
@@ -248,7 +273,8 @@ def open_session():
         seen = []
 
         def on_request(request):
-            if "m3u8" in request.url.lower():
+            low = request.url.lower()
+            if any(h in low for h in STREAM_HINTS):
                 seen.append(request.url)
                 if len(seen) > SEEN_CAP:
                     del seen[: SEEN_CAP // 2]
@@ -300,6 +326,14 @@ def close_session():
 
 
 def click_play(page, selectors):
+    """Tries a JS click first (works through ad overlays), then a normal Playwright click."""
+    if not selectors:
+        return False
+    for frame in page.frames:
+        result = safe_eval(frame, CLICK_PLAY_JS, selectors)
+        if result:
+            print(f"[capture] JS-clicked '{result}'", flush=True)
+            return True
     for frame in page.frames:
         for selector in selectors:
             try:
@@ -324,7 +358,7 @@ def needs_load(cfg):
         return True
     if REFRESH.is_set():
         return True
-    if time.monotonic() - _session["loaded_at"] > cfg.get("reload_after_s", 300):
+    if time.monotonic() - _session["loaded_at"] > cfg.get("reload_after_s", 1800):
         return True
     return False
 
@@ -373,7 +407,7 @@ def capture_once(cfg):
     try:
         if not _session["context"]:
             set_stage("launching_chrome")
-            open_session()
+            open_session(cfg)
 
         if needs_load(cfg):
             load_page(cfg)
@@ -429,9 +463,9 @@ def capture_once(cfg):
             "frames": len(page.frames),
             "clicked_play": _session["clicked"],
             "vle_ready": _session["vle_ready"],
-            "network_m3u8_seen": len(_session["seen"]),
-            "page_source_m3u8": len(_session["source_hits"]),
-            "store_popup_m3u8": len(_session["store_hits"]),
+            "network_stream_seen": len(_session["seen"]),
+            "page_source_hits": len(_session["source_hits"]),
+            "store_popup_hits": len(_session["store_hits"]),
             "extensions_loaded": [e["name"] for e in _session["exts"]],
         }
         STAGE["error"] = json.dumps(diag, ensure_ascii=False)
