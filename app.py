@@ -28,7 +28,7 @@ import requests as _plain_requests
 from flask import Flask, Response, jsonify, redirect, request, send_from_directory
 from werkzeug.middleware.proxy_fix import ProxyFix
 
-from capture import STAGE, capture_once, request_reload
+from capture import STAGE, capture_once, request_reload, token_expired
 from cors import install_cors
 
 # Prefer curl_cffi: it copies Chrome's TLS fingerprint, which many CDNs require.
@@ -211,18 +211,23 @@ def capture_loop():
                 # Discard the result if the user changed the target during this cycle.
                 if STATE["page_url"] != page_url or STATE["manual_url"]:
                     pass
-                elif url:
+                elif url and not token_expired(url):
                     if url != STATE["url"]:
                         STATE["url"] = url
                         STATE["updated_at"] = now_iso()
                     STATE["last_error"] = None
                 else:
-                    STATE["last_error"] = STAGE.get("error") or "No stream found within timeout"
+                    STATE["last_error"] = STAGE.get("error") or "No fresh stream found within timeout"
         except Exception as exc:
             log(f"Cycle {cycle} failed:\n{traceback.format_exc()}")
             with LOCK:
                 STATE["last_error"] = f"{type(exc).__name__}: {exc}"
 
+        with LOCK:
+            if STATE["url"] and token_expired(STATE["url"]) and not STATE["manual_url"]:
+                log("Stored stream token expired, clearing it.")
+                STATE["url"] = None
+                STATE["last_error"] = "Stream token expired, waiting for a fresh one"
         WAKE.wait(CFG["refresh_interval_s"])
         WAKE.clear()
 
@@ -270,9 +275,11 @@ def api_stream():
         url = STATE["url"]
         updated_at = STATE["updated_at"]
         last_error = STATE["last_error"]
+    if url and token_expired(url):
+        url = None
 
     if not url:
-        return jsonify({"error": "No stream captured yet", "last_error": last_error}), 404
+        return jsonify({"error": "No fresh stream captured yet", "last_error": last_error}), 404
     return jsonify({
         "url": url,
         "proxy_url": "/proxy?url=" + quote(url, safe=""),
@@ -369,7 +376,7 @@ def proxy():
 # ---------------------------------------------------------------------------
 # M3U endpoints for IPTV apps (OTT Navigator etc.)
 #   /playlist.m3u  -> one stable channel, with the headers the CDN expects
-#   /live.m3u8     -> always the CURRENT captured stream (302)
+#   /live.m3u8     -> always the CURRENT captured stream (302), never an expired one
 # ---------------------------------------------------------------------------
 ACCESS_KEY = os.environ.get("ACCESS_KEY", "").strip()
 CHANNEL_NAME = CFG.get("channel_name", "Live")
@@ -392,8 +399,6 @@ def playlist_m3u():
         "#EXTM3U",
         f'#EXTINF:-1 tvg-id="{CHANNEL_ID}" tvg-name="{CHANNEL_NAME}",{CHANNEL_NAME}',
     ]
-    # Headers the CDN checks. Players that support #EXTVLCOPT (VLC, OTT Navigator)
-    # send them on the stream request, like the web page does.
     if CHANNEL_REFERER:
         lines.append(f"#EXTVLCOPT:http-referrer={CHANNEL_REFERER}/")
         lines.append(f"#EXTVLCOPT:http-origin={CHANNEL_REFERER}")
@@ -410,9 +415,13 @@ def live_m3u8():
         return Response("Forbidden", status=403)
     with LOCK:
         url = STATE["url"]
+    if url and token_expired(url):
+        url = None
     if not url:
-        return Response("No stream captured yet, try again in a minute.",
-                        status=503, headers={"Retry-After": "10"})
+        request_reload()
+        WAKE.set()
+        return Response("Stream token expired, fetching a fresh one. Retry in ~1 minute.",
+                        status=503, headers={"Retry-After": "30"})
     if LIVE_MODE == "direct":
         target = url
     else:
