@@ -23,12 +23,21 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote, urljoin, urlparse, urlunparse
 
-import requests
+import requests as _plain_requests
 from flask import Flask, Response, jsonify, redirect, request, send_from_directory
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 from capture import STAGE, capture_once, request_reload
 from cors import install_cors
+
+# Prefer curl_cffi: it copies Chrome's TLS fingerprint, which many CDNs require.
+# Falls back to plain requests if curl_cffi is not installed.
+try:
+    from curl_cffi import requests as http_client
+    HTTP_IMPERSONATE = "chrome"
+except ImportError:
+    http_client = _plain_requests
+    HTTP_IMPERSONATE = None
 
 BASE_DIR = Path(__file__).resolve().parent
 CFG = json.loads((BASE_DIR / "config.json").read_text(encoding="utf-8"))
@@ -115,6 +124,20 @@ def origin_for(target):
         return f"{parsed.scheme}://{parsed.netloc}"
     t = urlparse(target)
     return f"{t.scheme}://{t.netloc}"
+
+
+def upstream_get(target, headers, range_header=None):
+    """Fetches from the CDN, Chrome-like when curl_cffi is available."""
+    req_headers = dict(headers)
+    if range_header:
+        req_headers["Range"] = range_header
+    kwargs = {"headers": req_headers, "stream": True,
+              "timeout": (10, 30), "allow_redirects": True}
+    if HTTP_IMPERSONATE:
+        kwargs["impersonate"] = HTTP_IMPERSONATE
+    else:
+        kwargs["headers"]["User-Agent"] = USER_AGENT
+    return http_client.get(target, **kwargs)
 
 
 def read_playlist(resp):
@@ -254,6 +277,7 @@ def api_status():
     with LOCK:
         data = dict(STATE)
     data["stage"] = dict(STAGE)
+    data["http_client"] = "curl_cffi" if HTTP_IMPERSONATE else "requests"
     return jsonify(data)
 
 
@@ -265,22 +289,28 @@ def proxy():
 
     origin = origin_for(target)
     headers = {
-        "User-Agent": USER_AGENT,
         "Accept": "*/*",
-        "Accept-Encoding": "identity",
         "Referer": origin + "/",
         "Origin": origin,
     }
-    if request.headers.get("Range"):
-        headers["Range"] = request.headers["Range"]
 
     try:
-        upstream = requests.get(target, headers=headers, stream=True,
-                                timeout=(10, 30), allow_redirects=True)
-    except requests.RequestException as exc:
-        return jsonify({"error": f"Upstream failed: {exc}"}), 502
+        upstream = upstream_get(target, headers, request.headers.get("Range"))
+    except Exception as exc:
+        log(f"Upstream request failed: {type(exc).__name__}: {exc}")
+        return jsonify({"error": f"Upstream failed: {type(exc).__name__}: {exc}"}), 502
 
+    status = upstream.status_code
     ctype = upstream.headers.get("Content-Type", "")
+    log(f"Upstream {status} {ctype} <- {upstream.url[:120]}")
+
+    if status >= 400:
+        upstream.close()
+        return jsonify({
+            "error": f"Upstream returned HTTP {status}",
+            "hint": "The CDN refused the request. Check the Render logs for details.",
+        }), 502
+
     is_playlist = ("mpegurl" in ctype.lower()
                    or urlparse(upstream.url).path.lower().endswith(".m3u8"))
 
@@ -293,7 +323,10 @@ def proxy():
         upstream.close()
 
         if not body.lstrip().startswith("#EXTM3U"):
-            return jsonify({"error": "Upstream did not return an HLS playlist"}), 502
+            return jsonify({
+                "error": "Upstream did not return an HLS playlist",
+                "first_bytes": body.lstrip()[:80],
+            }), 502
 
         return Response(
             rewrite_playlist(body, upstream.url),
@@ -318,7 +351,7 @@ def proxy():
 
     return Response(
         generate(),
-        status=upstream.status_code,
+        status=status,
         content_type=ctype or "application/octet-stream",
         headers=out_headers,
     )
