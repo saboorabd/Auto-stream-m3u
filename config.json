@@ -1,6 +1,6 @@
 {
   "page_url": "https://jjtvxweb.pages.dev/pind?id=3051",
-  "channel_name": "Zeethirai",
+  "channel_name": "Zee thirai",
   "channel_id": "3051",
   "play_selectors": ["button.play", "video", "[aria-label='Play']"],
   "stream_pattern": "\\.m3u8(?:$|[?#])",
