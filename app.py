@@ -1,14 +1,16 @@
 """
 Stream Capture server (M3U edition).
   - GET  /playlist.m3u: IPTV playlist with one stable channel link + headers (#EXTVLCOPT)
-  - GET  /live.m3u8   : current captured stream
+  - GET  /live.m3u8   : current captured stream (HLS or DASH)
                         LIVE_MODE=direct (default): 302 to the CDN link
                         LIVE_MODE=proxy           : 302 to /proxy (server fetches it)
-  - POST /api/target  : a page URL (auto-capture) or a direct .m3u8 URL (manual play).
+  - POST /api/target  : a page URL (auto-capture) or a direct stream URL (manual play).
   - POST /api/refresh : a viewer's link died, reload the capture page.
   - GET  /api/stream  : current stream (raw url + proxy_url).
   - GET  /api/status  : state, capture stage, last error.
-  - GET  /proxy       : same-origin proxy with Referer/Origin/UA headers.
+  - GET  /api/probe   : server-side check of the current stream (200 / 403 / 451 + details).
+  - GET  /proxy       : same-origin proxy. HLS and DASH manifests are rewritten so every
+                        segment goes through /proxy with its token kept.
   - GET  /            : player page.
   - GET  /player.js, /player.css, /player-config.json : player files.
 """
@@ -43,6 +45,7 @@ BASE_DIR = Path(__file__).resolve().parent
 CFG = json.loads((BASE_DIR / "config.json").read_text(encoding="utf-8"))
 
 M3U8_RE = re.compile(r"\.m3u8(?:$|[?#])", re.IGNORECASE)
+STREAM_RE = re.compile(r"\.(?:m3u8|mpd)(?:$|[?#])", re.IGNORECASE)
 
 # Only these files are served from the root path. Everything else is 404.
 PLAYER_FILES = {"player.js", "player-config.json", "player.css"}
@@ -58,7 +61,7 @@ USER_AGENT = CFG.get("user_agent") or (
     "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 )
 CHUNK_BYTES = 64 * 1024
-MAX_PLAYLIST_BYTES = 2 * 1024 * 1024
+MAX_PLAYLIST_BYTES = 4 * 1024 * 1024
 
 LOCK = threading.Lock()
 WAKE = threading.Event()
@@ -106,8 +109,8 @@ def is_valid_page_url(value):
     return parsed.scheme in ("http", "https") and bool(parsed.netloc)
 
 
-def is_m3u8(value):
-    return bool(M3U8_RE.search(value or ""))
+def is_stream_url(value):
+    return bool(STREAM_RE.search(value or ""))
 
 
 def origin_of(url):
@@ -117,9 +120,9 @@ def origin_of(url):
     return ""
 
 
-# Initial state. If config.json holds a direct .m3u8 link, play it straight away.
+# Initial state. If config.json holds a direct stream link, play it straight away.
 _initial_page = CFG.get("page_url", "")
-if is_m3u8(_initial_page):
+if is_stream_url(_initial_page):
     STATE = {"page_url": "", "manual_url": _initial_page, "url": _initial_page,
              "updated_at": now_iso(), "last_error": None, "cycles": 0}
 else:
@@ -135,30 +138,30 @@ def origin_for(target):
 
 
 def upstream_get(target, headers, range_header=None):
-    """Fetches from the CDN, Chrome-like when curl_cffi is available."""
+    """Fetches from the CDN, Chrome-like when curl_cffi is available.
+    The User-Agent is always the configured one, the same as the viewer's device."""
     req_headers = dict(headers)
+    req_headers["User-Agent"] = USER_AGENT
     if range_header:
         req_headers["Range"] = range_header
     kwargs = {"headers": req_headers, "stream": True,
               "timeout": (10, 30), "allow_redirects": True}
     if HTTP_IMPERSONATE:
         kwargs["impersonate"] = HTTP_IMPERSONATE
-    else:
-        kwargs["headers"]["User-Agent"] = USER_AGENT
     return http_client.get(target, **kwargs)
 
 
-def read_playlist(resp):
+def read_body(resp):
     data = bytearray()
     for chunk in resp.iter_content(CHUNK_BYTES):
         data.extend(chunk)
         if len(data) > MAX_PLAYLIST_BYTES:
-            raise ValueError("Playlist exceeds size limit")
+            raise ValueError("Manifest exceeds size limit")
     return data.decode("utf-8", errors="replace")
 
 
 def rewrite_playlist(text, base_url):
-    """Routes every URI in the playlist (segments, sub-playlists, keys) back through /proxy."""
+    """HLS: routes every URI in the playlist (segments, sub-playlists, keys) through /proxy."""
     base_query = urlparse(base_url).query
 
     def wrap(uri):
@@ -180,6 +183,33 @@ def rewrite_playlist(text, base_url):
         else:
             lines.append(wrap(stripped))
     return "\n".join(lines) + "\n"
+
+
+def rewrite_mpd(text, base_url):
+    """DASH: rewrites a manifest so every segment goes through /proxy with the token kept.
+    Segment URLs are relative in the MPD, and a relative URL drops the query string
+    (the __hdnea__ token), so the token is put back on every segment URL here."""
+    base_query = urlparse(base_url).query
+    base = base_url
+    m = re.search(r"<BaseURL[^>]*>\s*([^<\s]+)\s*</BaseURL>", text)
+    if m:
+        base = urljoin(base_url, m.group(1).strip())
+    # BaseURL is removed: the rewritten attributes are absolute /proxy paths,
+    # and a relative path would otherwise resolve against the CDN host.
+    text = re.sub(r"<BaseURL[^>]*>[^<]*</BaseURL>", "", text)
+
+    def wrap(value):
+        resolved = urljoin(base, value)
+        parsed = urlparse(resolved)
+        if base_query and not parsed.query:
+            resolved = urlunparse(parsed._replace(query=base_query))
+        # Keep $Number$ / $Time$ / $RepresentationID$ placeholders readable for the player.
+        return "/proxy?url=" + quote(resolved, safe="$/:@!*~,;+")
+
+    def repl(match):
+        return f'{match.group(1)}="{wrap(match.group(2))}"'
+
+    return re.sub(r'\b(media|initialization|sourceURL)="([^"]*)"', repl, text)
 
 
 def cors_headers():
@@ -237,11 +267,11 @@ def api_target():
     body = request.get_json(silent=True) or {}
     value = str(body.get("page_url") or body.get("stream_url") or "").strip()
     if not value:
-        return jsonify({"error": "Paste a page URL or a .m3u8 link"}), 400
+        return jsonify({"error": "Paste a page URL or a stream link"}), 400
 
-    if is_m3u8(value):
+    if is_stream_url(value):
         if not is_allowed_target(value):
-            return jsonify({"error": "Enter a valid public http(s) .m3u8 URL"}), 400
+            return jsonify({"error": "Enter a valid public http(s) stream URL"}), 400
         with LOCK:
             STATE.update(page_url="", manual_url=value, url=value,
                          updated_at=now_iso(), last_error=None)
@@ -250,7 +280,7 @@ def api_target():
         return jsonify({"ok": True, "mode": "manual"}), 202
 
     if not is_valid_page_url(value):
-        return jsonify({"error": "Enter a full http(s) page URL or .m3u8 link"}), 400
+        return jsonify({"error": "Enter a full http(s) page URL or stream link"}), 400
 
     with LOCK:
         STATE.update(page_url=value, manual_url=None, url=None,
@@ -294,6 +324,8 @@ def api_status():
     data["stage"] = dict(STAGE)
     data["http_client"] = "curl_cffi" if HTTP_IMPERSONATE else "requests"
     data["live_mode"] = LIVE_MODE
+    url = data.get("url") or ""
+    data["stream_kind"] = "dash" if ".mpd" in url.lower() else ("hls" if ".m3u8" in url.lower() else None)
     return jsonify(data)
 
 
@@ -325,15 +357,32 @@ def proxy():
         hint = "The CDN refused the request."
         if status == 451:
             hint = ("HTTP 451 = geo-blocked. This server's location is outside the "
-                    "content's allowed region. Use LIVE_MODE=direct so the device fetches it.")
+                    "content's allowed region. Use LIVE_MODE=direct, or host the proxy in India.")
+        elif status == 403:
+            hint = ("HTTP 403 = token or headers rejected. Check exp= (token may have expired) "
+                    "and that the segment requests carry the token.")
         return jsonify({"error": f"Upstream returned HTTP {status}", "hint": hint}), 502
 
-    is_playlist = ("mpegurl" in ctype.lower()
-                   or urlparse(upstream.url).path.lower().endswith(".m3u8"))
+    path_low = urlparse(upstream.url).path.lower()
+    is_dash = ("dash+xml" in ctype.lower() or path_low.endswith(".mpd"))
+    is_playlist = ("mpegurl" in ctype.lower() or path_low.endswith(".m3u8"))
+
+    if is_dash:
+        try:
+            body = read_body(upstream)
+        except ValueError as exc:
+            upstream.close()
+            return jsonify({"error": str(exc)}), 502
+        upstream.close()
+        if "<MPD" not in body:
+            return jsonify({"error": "Upstream did not return a DASH manifest",
+                            "first_bytes": body.lstrip()[:80]}), 502
+        return Response(rewrite_mpd(body, upstream.url), status=200,
+                        content_type="application/dash+xml", headers=cors_headers())
 
     if is_playlist:
         try:
-            body = read_playlist(upstream)
+            body = read_body(upstream)
         except ValueError as exc:
             upstream.close()
             return jsonify({"error": str(exc)}), 502
@@ -429,6 +478,34 @@ def live_m3u8():
     resp = redirect(target, code=302)
     resp.headers["Cache-Control"] = "no-cache, no-store"
     return resp
+
+
+@app.get("/api/probe")
+def api_probe():
+    """Diagnostic: fetches the current stream from the server and reports what the CDN said.
+    200 = works from this server. 451 = geo-blocked for this server's region. 403 = token/headers."""
+    if not key_ok():
+        return Response("Forbidden", status=403)
+    with LOCK:
+        url = STATE["url"]
+    if not url or token_expired(url):
+        return jsonify({"ok": False, "reason": "no fresh stream yet"}), 404
+    origin = origin_for(url)
+    try:
+        r = upstream_get(url, {"Accept": "*/*", "Referer": origin + "/", "Origin": origin})
+        ok = r.status_code < 400
+        text = r.text[:200000] if ok else ""
+        info = {
+            "ok": ok,
+            "status": r.status_code,
+            "content_type": r.headers.get("Content-Type", ""),
+            "has_content_protection": ("ContentProtection" in text) if ok else None,
+            "first_bytes": text[:120],
+        }
+        r.close()
+        return jsonify(info), (200 if ok else 502)
+    except Exception as exc:
+        return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 502
 
 
 @app.get("/<name>")
