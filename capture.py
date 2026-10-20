@@ -8,6 +8,7 @@ is NOT reloaded every cycle. It is reloaded only when needed:
   - a viewer reported a dead link (request_reload)
   - it has been loaded for reload_after_s (signed links expire)
   - no stream was seen for a whole capture_timeout_s
+  - only EXPIRED tokens were seen (the player stopped asking for new ones)
 
 Sources, priority order (first match wins, newest match is returned):
   1. Video Link Extractor Pro (getLinks)
@@ -26,6 +27,7 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 from playwright.sync_api import sync_playwright
 
@@ -83,6 +85,24 @@ async () => {
 IS_EXTENSION_PAGE_JS = """
 () => typeof chrome !== 'undefined' && !!chrome.runtime && !!chrome.runtime.id
 """
+
+TOKEN_MARGIN_S = 60  # a token this close to expiry is treated as already expired
+
+
+def token_expired(url, margin=TOKEN_MARGIN_S):
+    """True if the URL carries an expiry time (exp=, or __hdnea__=...~exp=...) that has passed.
+    Tokenized CDN links (Jio, Akamai style) stop working after that time."""
+    if not url:
+        return False
+    parsed = urlparse(url)
+    candidates = []
+    for values in parse_qs(parsed.query).values():
+        candidates.extend(values)
+    for value in candidates:
+        match = re.search(r"(?:^|[~;&=])exp=(\d{9,11})", value)
+        if match:
+            return int(match.group(1)) - margin <= time.time()
+    return False
 
 
 def request_reload():
@@ -333,12 +353,17 @@ def load_page(cfg):
 
 
 def pick(pattern, *groups):
-    """Returns the newest match from the first group that has one."""
+    """Returns the newest NON-EXPIRED match from the first group that has one.
+    Also returns whether an expired match was seen (so the caller can reload)."""
+    stale = False
     for group in groups:
         matches = [u for u in group if pattern.search(u)]
-        if matches:
-            return matches[-1]
-    return None
+        fresh = [u for u in matches if not token_expired(u)]
+        if len(fresh) < len(matches):
+            stale = True
+        if fresh:
+            return fresh[-1], stale
+    return None, stale
 
 
 def capture_once(cfg):
@@ -355,6 +380,7 @@ def capture_once(cfg):
 
         page = _session["page"]
         deadline = time.monotonic() + cfg["capture_timeout_s"]
+        reloaded_for_token = False
 
         while True:
             if not _session["clicked"]:
@@ -362,13 +388,23 @@ def capture_once(cfg):
             start_video(page)
 
             vle_hits = collect_vle(_session["vle_popup"]) if _session["vle_ready"] else []
-            found = pick(pattern, vle_hits, list(_session["seen"]))
+            found, stale = pick(pattern, vle_hits, list(_session["seen"]))
 
             if not found and time.monotonic() - _session["last_slow"] >= SLOW_SCAN_S:
                 _session["last_slow"] = time.monotonic()
                 _session["store_hits"] = scan_store_popups(_session["scan_tab"], _session["exts"])
                 _session["source_hits"] = scan_page_sources(page)
-                found = pick(pattern, _session["store_hits"], _session["source_hits"])
+                found, stale_slow = pick(pattern, _session["store_hits"], _session["source_hits"])
+                stale = stale or stale_slow
+
+            # Only expired links were seen: the player has stopped asking for fresh ones.
+            # Reload the page right away so it requests a new token.
+            if not found and stale and not reloaded_for_token:
+                reloaded_for_token = True
+                print("[capture] only expired token seen, reloading page", flush=True)
+                load_page(cfg)
+                deadline = max(deadline, time.monotonic() + cfg["capture_timeout_s"])
+                continue
 
             if found:
                 if found != _session["last_found"]:
@@ -388,7 +424,7 @@ def capture_once(cfg):
         except Exception:
             title = ""
         diag = {
-            "diagnosis": "No matching stream from any source. Check play_selectors or page_url.",
+            "diagnosis": "No fresh (non-expired) stream from any source. Check play_selectors or page_url.",
             "page_title": title,
             "frames": len(page.frames),
             "clicked_play": _session["clicked"],
