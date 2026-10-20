@@ -21,7 +21,7 @@ import threading
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import quote, urljoin, urlparse
+from urllib.parse import quote, urljoin, urlparse, urlunparse
 
 import requests
 from flask import Flask, Response, jsonify, redirect, request, send_from_directory
@@ -49,6 +49,7 @@ LOCK = threading.Lock()
 WAKE = threading.Event()
 
 app = Flask(__name__)
+# Render sits behind a proxy: trust its headers so https:// URLs are built correctly.
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 install_cors(app)
 
@@ -127,9 +128,16 @@ def read_playlist(resp):
 
 def rewrite_playlist(text, base_url):
     """Routes every URI in the playlist (segments, sub-playlists, keys) back through /proxy."""
+    base_query = urlparse(base_url).query
 
     def wrap(uri):
-        return "/proxy?url=" + quote(urljoin(base_url, uri), safe="")
+        resolved = urljoin(base_url, uri)
+        # Tokenized CDNs (e.g. ?__hdnea__=...) put the token in the playlist URL.
+        # Relative segment URIs lose it when joined, so carry it over.
+        parsed = urlparse(resolved)
+        if base_query and not parsed.query:
+            resolved = urlunparse(parsed._replace(query=base_query))
+        return "/proxy?url=" + quote(resolved, safe="")
 
     lines = []
     for line in text.splitlines():
@@ -316,19 +324,6 @@ def proxy():
     )
 
 
-@app.get("/<name>")
-def player_asset(name):
-    """Serves only the player files listed in PLAYER_FILES. Anything else is 404."""
-    if name not in PLAYER_FILES:
-        return jsonify({"error": "not found"}), 404
-    return send_from_directory(BASE_DIR / "static", name)
-
-
-@app.get("/")
-def index():
-    return send_from_directory(BASE_DIR / "static", "index.html")
-
-
 # ---------------------------------------------------------------------------
 # M3U endpoints for IPTV apps (OTT Navigator etc.)
 #   /playlist.m3u  -> M3U file with ONE stable channel link (add this URL once)
@@ -372,6 +367,19 @@ def live_m3u8():
     resp = redirect("/proxy?url=" + quote(url, safe=""), code=302)
     resp.headers["Cache-Control"] = "no-cache, no-store"
     return resp
+
+
+@app.get("/<n>")
+def player_asset(name):
+    """Serves only the player files listed in PLAYER_FILES. Anything else is 404."""
+    if name not in PLAYER_FILES:
+        return jsonify({"error": "not found"}), 404
+    return send_from_directory(BASE_DIR / "static", name)
+
+
+@app.get("/")
+def index():
+    return send_from_directory(BASE_DIR / "static", "index.html")
 
 
 threading.Thread(target=capture_loop, daemon=True).start()
