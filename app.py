@@ -368,7 +368,8 @@ def live_m3u8():
     resp.headers["Cache-Control"] = "no-cache, no-store"
     return resp
 
-@app.get("/<name>") 
+
+@app.get("/<name>")
 def player_asset(name):
     """Serves only the player files listed in PLAYER_FILES. Anything else is 404."""
     if name not in PLAYER_FILES:
