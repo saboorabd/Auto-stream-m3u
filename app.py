@@ -1,5 +1,5 @@
 """
-Stream Capture server (M3U edition with DASH, DRM support & Direct Segment Routing).
+Stream Capture server (M3U edition with DASH, DRM, ClearKey & OTT Navigator / Kodi tags).
 """
 
 import ipaddress
@@ -125,7 +125,6 @@ def read_body(resp):
     return data.decode("utf-8", errors="replace")
 
 def rewrite_mpd(text, base_url):
-    """Rewrites DASH manifest segments: direct mode keeps CDN URLs, proxy mode routes through server."""
     base_query = urlparse(base_url).query
     base = base_url
     m = re.search(r"<BaseURL[^>]*>\s*([^<\s]+)\s*</BaseURL>", text)
@@ -138,10 +137,6 @@ def rewrite_mpd(text, base_url):
         parsed = urlparse(resolved)
         if base_query and not parsed.query:
             resolved = urlunparse(parsed._replace(query=base_query))
-        
-        # If direct mode is active, return absolute CDN URL directly to avoid Render proxy blocks (502)
-        if LIVE_MODE == "direct":
-            return resolved
         return "/proxy?url=" + quote(resolved, safe="$/:@!*~,;+")
 
     def repl(match):
@@ -316,9 +311,10 @@ def proxy():
     )
 
 ACCESS_KEY = os.environ.get("ACCESS_KEY", "").strip()
-CHANNEL_NAME = CFG.get("channel_name", "Live")
-CHANNEL_ID = CFG.get("channel_id", "live1")
+CHANNEL_NAME = CFG.get("channel_name", "Zee Thirai HD")
+CHANNEL_ID = CFG.get("channel_id", "zeethirai")
 CHANNEL_REFERER = CFG.get("referer") or origin_of(CFG.get("page_url", ""))
+CHANNEL_LOGO = "https://jiotvimages.cdn.jio.com/dare_images/images/ZeeThiraiHD.png"
 
 def key_ok():
     return not ACCESS_KEY or request.args.get("key", "") == ACCESS_KEY
@@ -327,17 +323,32 @@ def key_ok():
 def playlist_m3u():
     if not key_ok():
         return Response("Forbidden", status=403)
-    base = request.host_url.rstrip("/")
-    key_q = f"?key={ACCESS_KEY}" if ACCESS_KEY else ""
+    
+    with LOCK:
+        url = STATE["url"]
+    
+    if not url or token_expired(url):
+        url = "https://jiotvpllive.cdn.jio.com/bpk-tv/ZeeThiraiHD_BTS/WDVLive/index.mpd"
+
+    # Extract query params / tokens from the captured URL for cookies/headers
+    parsed_url = urlparse(url)
+    query_string = parsed_url.query
+
     lines = [
         "#EXTM3U",
-        f'#EXTINF:-1 tvg-id="{CHANNEL_ID}" tvg-name="{CHANNEL_NAME}",{CHANNEL_NAME}',
+        f'#EXTINF:-1 tvg-id="{CHANNEL_ID}" tvg-name="{CHANNEL_NAME}" tvg-logo="{CHANNEL_LOGO}" group-title="Tamil",{CHANNEL_NAME}',
+        '#KODIPROP:inputstream.adaptive.license_type=clearkey',
+        '#KODIPROP:inputstream.adaptive.license_key={"58d0716748ee52f4a55cf7baa6e072bb":"8fc185a1015f026fec82236bb0e096f4","c2d762acbea256c0bd67b92d59f69757":"46c59697457af3a687426a4691393774"}',
     ]
     if CHANNEL_REFERER:
         lines.append(f"#EXTVLCOPT:http-referrer={CHANNEL_REFERER}/")
         lines.append(f"#EXTVLCOPT:http-origin={CHANNEL_REFERER}")
     lines.append(f"#EXTVLCOPT:http-user-agent={USER_AGENT}")
-    lines.append(f"{base}/live.m3u8{key_q}")
+    
+    if query_string:
+        lines.append(f'#EXTHTTP:{{"cookie":"{query_string}"}}')
+
+    lines.append(url)
     return Response("\n".join(lines) + "\n",
                     content_type="audio/x-mpegurl; charset=utf-8",
                     headers={"Cache-Control": "no-cache"})
@@ -356,11 +367,7 @@ def live_m3u8():
         return Response("Stream token expired, fetching a fresh one. Retry in ~5 seconds.",
                         status=503, headers={"Retry-After": "5"})
     
-    if LIVE_MODE == "direct":
-        target = url
-    else:
-        target = "/proxy?url=" + quote(url, safe="")
-    
+    target = url
     resp = redirect(target, code=302)
     resp.headers["Cache-Control"] = "no-cache, no-store"
     return resp
