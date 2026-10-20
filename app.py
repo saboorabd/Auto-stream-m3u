@@ -1,15 +1,14 @@
 """
 Stream Capture server (M3U edition).
-  - GET  /playlist.m3u: IPTV playlist with one stable channel link
+  - GET  /playlist.m3u: IPTV playlist with one stable channel link + headers (#EXTVLCOPT)
   - GET  /live.m3u8   : current captured stream
-                        LIVE_MODE=direct (default): 302 to the CDN link (phone fetches directly)
-                        LIVE_MODE=proxy           : 302 to /proxy (server fetches, needs non-geo-blocked host)
+                        LIVE_MODE=direct (default): 302 to the CDN link
+                        LIVE_MODE=proxy           : 302 to /proxy (server fetches it)
   - POST /api/target  : a page URL (auto-capture) or a direct .m3u8 URL (manual play).
   - POST /api/refresh : a viewer's link died, reload the capture page.
   - GET  /api/stream  : current stream (raw url + proxy_url).
   - GET  /api/status  : state, capture stage, last error.
-  - GET  /proxy       : same-origin proxy. Adds Referer/Origin and CORS headers,
-                        rewrites HLS playlists so segments also go through here.
+  - GET  /proxy       : same-origin proxy with Referer/Origin/UA headers.
   - GET  /            : player page.
   - GET  /player.js, /player.css, /player-config.json : player files.
 """
@@ -33,7 +32,6 @@ from capture import STAGE, capture_once, request_reload
 from cors import install_cors
 
 # Prefer curl_cffi: it copies Chrome's TLS fingerprint, which many CDNs require.
-# Falls back to plain requests if curl_cffi is not installed.
 try:
     from curl_cffi import requests as http_client
     HTTP_IMPERSONATE = "chrome"
@@ -55,7 +53,7 @@ LIVE_MODE = os.environ.get("LIVE_MODE", "direct").strip().lower()
 if LIVE_MODE not in ("direct", "proxy"):
     LIVE_MODE = "direct"
 
-USER_AGENT = (
+USER_AGENT = CFG.get("user_agent") or (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 )
@@ -66,7 +64,6 @@ LOCK = threading.Lock()
 WAKE = threading.Event()
 
 app = Flask(__name__)
-# Render sits behind a proxy: trust its headers so https:// URLs are built correctly.
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 install_cors(app)
 
@@ -113,6 +110,13 @@ def is_m3u8(value):
     return bool(M3U8_RE.search(value or ""))
 
 
+def origin_of(url):
+    parsed = urlparse(url or "")
+    if parsed.scheme and parsed.netloc:
+        return f"{parsed.scheme}://{parsed.netloc}"
+    return ""
+
+
 # Initial state. If config.json holds a direct .m3u8 link, play it straight away.
 _initial_page = CFG.get("page_url", "")
 if is_m3u8(_initial_page):
@@ -127,11 +131,7 @@ def origin_for(target):
     """Referer origin: the page being captured, or the stream's own host in manual mode."""
     with LOCK:
         page_url = STATE["page_url"] or ""
-    parsed = urlparse(page_url)
-    if parsed.scheme and parsed.netloc:
-        return f"{parsed.scheme}://{parsed.netloc}"
-    t = urlparse(target)
-    return f"{t.scheme}://{t.netloc}"
+    return origin_of(page_url) or origin_of(target)
 
 
 def upstream_get(target, headers, range_header=None):
@@ -345,7 +345,6 @@ def proxy():
             headers=cors_headers(),
         )
 
-    # Segments and other binary data are streamed through without buffering.
     def generate():
         try:
             for chunk in upstream.iter_content(CHUNK_BYTES):
@@ -369,14 +368,14 @@ def proxy():
 
 # ---------------------------------------------------------------------------
 # M3U endpoints for IPTV apps (OTT Navigator etc.)
-#   /playlist.m3u  -> M3U file with ONE stable channel link (add this URL once)
+#   /playlist.m3u  -> one stable channel, with the headers the CDN expects
 #   /live.m3u8     -> always the CURRENT captured stream (302)
-# The channel link never changes, so when the capture loop refreshes the
-# token, the app just gets the new stream the next time it opens the channel.
 # ---------------------------------------------------------------------------
 ACCESS_KEY = os.environ.get("ACCESS_KEY", "").strip()
 CHANNEL_NAME = CFG.get("channel_name", "Live")
 CHANNEL_ID = CFG.get("channel_id", "live1")
+# Referer/Origin to send to the CDN. Defaults to the page the stream came from.
+CHANNEL_REFERER = CFG.get("referer") or origin_of(CFG.get("page_url", ""))
 
 
 def key_ok():
@@ -389,12 +388,19 @@ def playlist_m3u():
         return Response("Forbidden", status=403)
     base = request.host_url.rstrip("/")
     key_q = f"?key={ACCESS_KEY}" if ACCESS_KEY else ""
-    body = (
-        "#EXTM3U\n"
-        f'#EXTINF:-1 tvg-id="{CHANNEL_ID}" tvg-name="{CHANNEL_NAME}",{CHANNEL_NAME}\n'
-        f"{base}/live.m3u8{key_q}\n"
-    )
-    return Response(body, content_type="audio/x-mpegurl; charset=utf-8",
+    lines = [
+        "#EXTM3U",
+        f'#EXTINF:-1 tvg-id="{CHANNEL_ID}" tvg-name="{CHANNEL_NAME}",{CHANNEL_NAME}',
+    ]
+    # Headers the CDN checks. Players that support #EXTVLCOPT (VLC, OTT Navigator)
+    # send them on the stream request, like the web page does.
+    if CHANNEL_REFERER:
+        lines.append(f"#EXTVLCOPT:http-referrer={CHANNEL_REFERER}/")
+        lines.append(f"#EXTVLCOPT:http-origin={CHANNEL_REFERER}")
+    lines.append(f"#EXTVLCOPT:http-user-agent={USER_AGENT}")
+    lines.append(f"{base}/live.m3u8{key_q}")
+    return Response("\n".join(lines) + "\n",
+                    content_type="audio/x-mpegurl; charset=utf-8",
                     headers={"Cache-Control": "no-cache"})
 
 
