@@ -1,7 +1,9 @@
 """
 Stream Capture server (M3U edition).
   - GET  /playlist.m3u: IPTV playlist with one stable channel link
-  - GET  /live.m3u8   : current captured stream (302 to /proxy)
+  - GET  /live.m3u8   : current captured stream
+                        LIVE_MODE=direct (default): 302 to the CDN link (phone fetches directly)
+                        LIVE_MODE=proxy           : 302 to /proxy (server fetches, needs non-geo-blocked host)
   - POST /api/target  : a page URL (auto-capture) or a direct .m3u8 URL (manual play).
   - POST /api/refresh : a viewer's link died, reload the capture page.
   - GET  /api/stream  : current stream (raw url + proxy_url).
@@ -46,6 +48,12 @@ M3U8_RE = re.compile(r"\.m3u8(?:$|[?#])", re.IGNORECASE)
 
 # Only these files are served from the root path. Everything else is 404.
 PLAYER_FILES = {"player.js", "player-config.json", "player.css"}
+
+# "direct": /live.m3u8 redirects to the CDN, so the viewer's own device fetches it.
+# "proxy":  /live.m3u8 redirects to /proxy, so this server fetches it.
+LIVE_MODE = os.environ.get("LIVE_MODE", "direct").strip().lower()
+if LIVE_MODE not in ("direct", "proxy"):
+    LIVE_MODE = "direct"
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -278,6 +286,7 @@ def api_status():
         data = dict(STATE)
     data["stage"] = dict(STAGE)
     data["http_client"] = "curl_cffi" if HTTP_IMPERSONATE else "requests"
+    data["live_mode"] = LIVE_MODE
     return jsonify(data)
 
 
@@ -306,10 +315,11 @@ def proxy():
 
     if status >= 400:
         upstream.close()
-        return jsonify({
-            "error": f"Upstream returned HTTP {status}",
-            "hint": "The CDN refused the request. Check the Render logs for details.",
-        }), 502
+        hint = "The CDN refused the request."
+        if status == 451:
+            hint = ("HTTP 451 = geo-blocked. This server's location is outside the "
+                    "content's allowed region. Use LIVE_MODE=direct so the device fetches it.")
+        return jsonify({"error": f"Upstream returned HTTP {status}", "hint": hint}), 502
 
     is_playlist = ("mpegurl" in ctype.lower()
                    or urlparse(upstream.url).path.lower().endswith(".m3u8"))
@@ -360,7 +370,7 @@ def proxy():
 # ---------------------------------------------------------------------------
 # M3U endpoints for IPTV apps (OTT Navigator etc.)
 #   /playlist.m3u  -> M3U file with ONE stable channel link (add this URL once)
-#   /live.m3u8     -> always the CURRENT captured stream (302 -> /proxy)
+#   /live.m3u8     -> always the CURRENT captured stream (302)
 # The channel link never changes, so when the capture loop refreshes the
 # token, the app just gets the new stream the next time it opens the channel.
 # ---------------------------------------------------------------------------
@@ -397,7 +407,11 @@ def live_m3u8():
     if not url:
         return Response("No stream captured yet, try again in a minute.",
                         status=503, headers={"Retry-After": "10"})
-    resp = redirect("/proxy?url=" + quote(url, safe=""), code=302)
+    if LIVE_MODE == "direct":
+        target = url
+    else:
+        target = "/proxy?url=" + quote(url, safe="")
+    resp = redirect(target, code=302)
     resp.headers["Cache-Control"] = "no-cache, no-store"
     return resp
 
