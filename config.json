@@ -1,7 +1,7 @@
 {
-  "page_url": "https://www.zee5.com/live-tv/zee-thirai-hd/0-9-224",
-  "channel_name": "My Stream",
-  "channel_id": "live1",
+  "page_url": "https://jjtvxweb.pages.dev/pind?id=3051",
+  "channel_name": "Zeethirai",
+  "channel_id": "3051",
   "play_selectors": ["button.play", "video", "[aria-label='Play']"],
   "stream_pattern": "\\.m3u8(?:$|[?#])",
   "capture_timeout_s": 60,
