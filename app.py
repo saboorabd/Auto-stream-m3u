@@ -1,5 +1,5 @@
 """
-Stream Capture server (M3U edition with DASH & DRM support).
+Stream Capture server (M3U edition with DASH, DRM support & Auto-Refresh).
 """
 
 import ipaddress
@@ -125,7 +125,6 @@ def read_body(resp):
     return data.decode("utf-8", errors="replace")
 
 def rewrite_mpd(text, base_url):
-    """DASH: rewrites manifest, keeps tokens on segments, and exposes ClearKey/Widevine mappings if needed."""
     base_query = urlparse(base_url).query
     base = base_url
     m = re.search(r"<BaseURL[^>]*>\s*([^<\s]+)\s*</BaseURL>", text)
@@ -185,11 +184,13 @@ def capture_loop():
                 STATE["last_error"] = f"{type(exc).__name__}: {exc}"
 
         with LOCK:
-            if STATE["url"] and token_expired(STATE["url"]) and not STATE["manual_url"]:
-                log("Stored stream token expired, clearing it.")
+            if not STATE["url"] or (token_expired(STATE["url"]) and not STATE["manual_url"]):
                 STATE["url"] = None
-                STATE["last_error"] = "Stream token expired, waiting for a fresh one"
-        WAKE.wait(CFG["refresh_interval_s"])
+                sleep_time = 5  # Token illana seekaram adutha capture try pannum
+            else:
+                sleep_time = CFG.get("refresh_interval_s", 300)
+
+        WAKE.wait(sleep_time)
         WAKE.clear()
 
 @app.post("/api/target")
@@ -347,8 +348,8 @@ def live_m3u8():
     if not url:
         request_reload()
         WAKE.set()
-        return Response("Stream token expired, fetching a fresh one. Retry in ~1 minute.",
-                        status=503, headers={"Retry-After": "30"})
+        return Response("Stream token expired, fetching a fresh one. Retry in ~5 seconds.",
+                        status=503, headers={"Retry-After": "5"})
     if LIVE_MODE == "direct":
         target = url
     else:
@@ -359,7 +360,6 @@ def live_m3u8():
 
 @app.get("/api/keys")
 def api_keys():
-    """Returns decrypted keys configuration for custom players supporting Clearkey/Widevine override."""
     return jsonify({
         "keys": {
             "58d0716748ee52f4a55cf7baa6e072bb": "8fc185a1015f026fec82236bb0e096f4",
