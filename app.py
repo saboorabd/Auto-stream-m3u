@@ -1,148 +1,41 @@
-import json
+from flask import Flask, jsonify, request
 import os
-import threading
-import time
-import traceback
-from datetime import datetime, timezone
-from pathlib import Path
-
-from flask import Flask, Response, jsonify, redirect, request, send_from_directory
-from werkzeug.middleware.proxy_fix import ProxyFix
-
-from capture import STAGE, capture_once, request_reload, token_expired
-from cors import install_cors
-
-BASE_DIR = Path(__file__).resolve().parent
-CFG = json.loads((BASE_DIR / "config.json").read_text(encoding="utf-8"))
-
-ACCESS_KEY = os.environ.get("ACCESS_KEY", "").strip()
-LIVE_WAIT_S = int(os.environ.get("LIVE_WAIT_S", "25"))
-CHANNEL_NAME = CFG.get("channel_name", "Live")
-CHANNEL_ID = CFG.get("channel_id", "live1")
-CHANNEL_LOGO = CFG.get("channel_logo", "")
-CHANNEL_GROUP = CFG.get("channel_group", "Live")
-USER_AGENT = CFG.get("user_agent", "")
-REFERER = CFG.get("referer", "")
-
-LOCK = threading.Lock()
-WAKE = threading.Event()
 
 app = Flask(__name__)
-app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
-install_cors(app)
 
-STATE = {
-    "page_url": CFG.get("page_url", ""),
-    "manual_url": None,
-    "url": None,
-    "updated_at": None,
-    "last_error": None,
-    "cycles": 0,
+# Sample token & stream configuration (playlistgen.py logic incorporated)
+HDNEA_TOKEN = "st=1792572197~exp=1792575797~acl=/bpk-tv/ZeeThiraiHD_BTS/WDVLive/*~hmac=f18cc023bf34c508140e33ef802cce2aaa2b39aedfd1aa438ac330fa66af6fa0"
+MPD_URL = f"https://jiotvpllive.cdn.jio.com/bpk-tv/ZeeThiraiHD_BTS/WDVLive/index.mpd?__hdnea__={HDNEA_TOKEN}"
+
+CLEARKEY_KEYS = {
+    "58d0716748ee52f4a55cf7baa6e072bb": "8fc185a1015f026fec82236bb0e096f4",
+    "c2d762acbea256c0bd67b92d59f69757": "46c59697457af3a687426a4691393774"
 }
 
-def log(message):
-    print(f"[{datetime.now():%H:%M:%S}] [app] {message}", flush=True)
+@app.route('/')
+def home():
+    return "Auto Stream M3U Service is Running Successfully! 🎉", 200
 
-def now_iso():
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+@app.route('/api/status')
+def status():
+    return jsonify({"status": "online", "message": "App is up and running"}), 200
 
-def key_ok():
-    return not ACCESS_KEY or request.args.get("key", "") == ACCESS_KEY
+@app.route('/api/stream')
+def stream():
+    # Playlistgen logic data output for the client
+    return jsonify({
+        "status": "success",
+        "channel_name": "Zee Thirai HD",
+        "stream_url": MPD_URL,
+        "keys": CLEARKEY_KEYS,
+        "headers": {
+            "Referer": "https://jjtvxweb.pages.dev/",
+            "Origin": "https://jjtvxweb.pages.dev",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+            "Cookie": f"__hdnea__={HDNEA_TOKEN}"
+        }
+    }), 200
 
-def fresh_url():
-    with LOCK:
-        url = STATE["url"]
-    return url if url and not token_expired(url) else None
-
-def capture_loop():
-    log("Capture loop started.")
-    while True:
-        with LOCK:
-            page_url = STATE["page_url"]
-            manual = STATE["manual_url"]
-            STATE["cycles"] += 1
-            cycle = STATE["cycles"]
-
-        if manual or not page_url:
-            WAKE.wait(CFG.get("refresh_interval_s", 5))
-            WAKE.clear()
-            continue
-
-        log(f"Cycle {cycle} on {page_url}")
-        try:
-            url = capture_once({**CFG, "page_url": page_url})
-            with LOCK:
-                if STATE["page_url"] == page_url and not STATE["manual_url"]:
-                    if url and not token_expired(url):
-                        if url != STATE["url"]:
-                            STATE["url"] = url
-                            STATE["updated_at"] = now_iso()
-                            STATE["last_error"] = None
-                    else:
-                        STATE["last_error"] = STAGE.get("error") or "No fresh stream found"
-        except Exception as exc:
-            log(f"Cycle {cycle} failed:\n{traceback.format_exc()}")
-            with LOCK:
-                STATE["last_error"] = f"{type(exc).__name__}: {exc}"
-
-        with LOCK:
-            if STATE["url"] and token_expired(STATE["url"]):
-                log("Stored link expired, clearing it.")
-                STATE["url"] = None
-                STATE["last_error"] = "Stream token expired, waiting for a fresh one"
-        WAKE.wait(CFG.get("refresh_interval_s", 5))
-        WAKE.clear()
-
-@app.get("/api/status")
-def api_status():
-    with LOCK:
-        data = dict(STATE)
-    data["stage"] = dict(STAGE)
-    data["live_mode"] = "direct"
-    url = data.get("url") or ""
-    data["stream_kind"] = "dash" if ".mpd" in url.lower() else ("hls" if ".m3u8" in url.lower() else None)
-    return jsonify(data)
-
-@app.get("/api/stream")
-def api_stream():
-    url = fresh_url()
-    if not url:
-        with LOCK:
-            err = STATE["last_error"]
-        return jsonify({"error": "No fresh stream captured yet", "last_error": err}), 404
-    return jsonify({"url": url, "updated_at": STATE["updated_at"]})
-
-@app.post("/api/refresh")
-def api_refresh():
-    request_reload()
-    WAKE.set()
-    log("Refresh requested.")
-    return jsonify({"ok": True}), 202
-
-@app.get("/live.m3u8")
-def live_m3u8():
-    if not key_ok():
-        return Response("Forbidden", status=403)
-    url = fresh_url()
-    if not url:
-        request_reload()
-        WAKE.set()
-        deadline = time.monotonic() + LIVE_WAIT_S
-        while time.monotonic() + 1 < deadline and not url:
-            time.sleep(1)
-            url = fresh_url()
-    if not url:
-        return Response("Stream is starting, retry in about 10 seconds.",
-                        status=503, headers={"Retry-After": "10"})
-    resp = redirect(url, code=302)
-    resp.headers["Cache-Control"] = "no-cache, no-store"
-    return resp
-
-@app.get("/")
-def index():
-    return send_from_directory(BASE_DIR / "static", "index.html")
-
-threading.Thread(target=capture_loop, daemon=True).start()
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8000)), threaded=True)
+if __name__ == '__main__':
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
