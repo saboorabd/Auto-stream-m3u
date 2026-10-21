@@ -1,6 +1,6 @@
 """
-Advanced Dynamic Stream Server with /get_key and Token Proxy support.
-Mimics PHP-like speed and dynamic session management using curl_cffi.
+Final Lightning-fast Dynamic Stream Server for Render.
+Includes /get_key, /get_stream, /playlist.m3u, and /api/status for background keeper.
 """
 
 import os
@@ -57,16 +57,32 @@ def fetch_fresh_stream():
     except Exception as exc:
         pass
     
-    # Fallback default stream
-    return "https://jiotvpllive.cdn.jio.com/bpk-tv/ZeeThiraiHD_BTS/WDVLive/index.mpd"
+    # Fallback default stream with active format
+    return "https://jiotvpllive.cdn.jio.com/bpk-tv/ZeeThiraiHD_BTS/WDVLive/index.mpd?__hdnea__=st=1792502910~exp=1792506510~acl=/bpk-tv/ZeeThiraiHD_BTS/WDVLive/*~hmac=fe0f6800c84c29f75c42f8e05457c3cb05c413d77e50daed218a52b53f06e7f5"
+
+@app.get("/api/status")
+def api_status():
+    """Background keeper script-kaana status endpoint"""
+    url = fetch_fresh_stream()
+    return jsonify({
+        "url": url,
+        "live_mode": "dynamic",
+        "http_client": "curl_cffi" if HTTP_IMPERSONATE else "requests",
+        "status": "online"
+    }), 200
+
+@app.get("/api/stream")
+def api_stream():
+    url = fetch_fresh_stream()
+    return jsonify({
+        "url": url,
+        "proxy_url": "/proxy?url=" + quote(url, safe=""),
+        "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    })
 
 @app.get("/get_key")
 def get_key():
     """Dynamic ClearKey Endpoint for OTT Navigator / InputStream Adaptive"""
-    channel_id = request.args.get("id", "zeethirai")
-    
-    # Inga ungaloda dynamic key extraction logic-ah add pannalam, 
-    #angillana active ClearKey JSON-ah dynamic-ah return panrom:
     clearkey_json = {
         "keys": [
             {
@@ -113,6 +129,15 @@ def playlist_m3u():
     return Response("\n".join(lines) + "\n",
                     content_type="audio/x-mpegurl; charset=utf-8",
                     headers={"Cache-Control": "no-cache"})
+
+@app.get("/live.m3u8")
+def live_m3u8():
+    if not key_ok():
+        return Response("Forbidden", status=403)
+    url = fetch_fresh_stream()
+    resp = redirect(url, code=302)
+    resp.headers["Cache-Control"] = "no-cache, no-store"
+    return resp
 
 @app.get("/")
 def index():
