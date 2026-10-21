@@ -1,6 +1,6 @@
 """
 Advanced Stream server combining PHP speed with Capture.py intelligence.
-Extracts fresh tokens on-the-fly using curl_cffi without headless browser delay.
+Includes /live.m3u8 redirect support.
 """
 
 import os
@@ -9,7 +9,7 @@ import json
 from datetime import datetime, timezone
 from urllib.parse import quote, urlparse
 from pathlib import Path
-from flask import Flask, Response, jsonify, request, send_from_directory
+from flask import Flask, Response, jsonify, request, redirect, send_from_directory
 from werkzeug.middleware.proxy_fix import ProxyFix
 from cors import install_cors
 
@@ -42,7 +42,6 @@ def origin_of(url):
         return f"{parsed.scheme}://{parsed.netloc}"
     return ""
 
-# Target web page or fallback stream
 PAGE_URL = CFG.get("page_url") or "https://jjtvxweb.pages.dev/pind?id=3051"
 ACCESS_KEY = os.environ.get("ACCESS_KEY", "").strip()
 CHANNEL_NAME = CFG.get("channel_name", "Zee Thirai HD")
@@ -54,7 +53,6 @@ def key_ok():
     return not ACCESS_KEY or request.args.get("key", "") == ACCESS_KEY
 
 def fetch_fresh_stream():
-    """Smart extraction like capture.py but instant via HTTP request"""
     headers = {
         "User-Agent": USER_AGENT,
         "Referer": CHANNEL_REFERER,
@@ -67,16 +65,12 @@ def fetch_fresh_stream():
     try:
         resp = http_client.get(PAGE_URL, **kwargs)
         if resp.status_code == 200:
-            # Search for mpd/m3u8 link with tokens in page source/scripts
             match = re.search(r'https?://[^\s<>"]+?\.(?:mpd|m3u8)[^\s<>"]*', resp.text)
             if match:
-                stream_url = match.group(0)
-                log(f"Successfully fetched fresh stream: {stream_url}")
-                return stream_url
+                return match.group(0)
     except Exception as exc:
         log(f"Failed to fetch fresh stream: {exc}")
     
-    # Fallback to default pattern if live fetch fails
     return "https://jiotvpllive.cdn.jio.com/bpk-tv/ZeeThiraiHD_BTS/WDVLive/index.mpd"
 
 @app.post("/api/target")
@@ -173,6 +167,15 @@ def playlist_m3u():
     return Response("\n".join(lines) + "\n",
                     content_type="audio/x-mpegurl; charset=utf-8",
                     headers={"Cache-Control": "no-cache"})
+
+@app.get("/live.m3u8")
+def live_m3u8():
+    if not key_ok():
+        return Response("Forbidden", status=403)
+    url = fetch_fresh_stream()
+    resp = redirect(url, code=302)
+    resp.headers["Cache-Control"] = "no-cache, no-store"
+    return resp
 
 @app.get("/api/keys")
 def api_keys():
