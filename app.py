@@ -127,7 +127,6 @@ def live_m3u8():
     if not url:
         request_reload()
         WAKE.set()
-    
         deadline = time.monotonic() + LIVE_WAIT_S
         while time.monotonic() + 1 < deadline and not url:
             time.sleep(1)
