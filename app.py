@@ -1,6 +1,6 @@
 """
-Advanced Stream server combining PHP speed with Capture.py intelligence.
-Includes /live.m3u8 redirect support.
+Lightning-fast Stream server for Render (No Playwright/Chrome dependency).
+Instant M3U playlist generation with ClearKey & Cookie support.
 """
 
 import os
@@ -24,82 +24,47 @@ BASE_DIR = Path(__file__).resolve().parent
 CFG_PATH = BASE_DIR / "config.json"
 CFG = json.loads(CFG_PATH.read_text(encoding="utf-8")) if CFG_PATH.exists() else {}
 
-USER_AGENT = CFG.get("user_agent") or (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-)
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+REFERER = "https://jjtvxweb.pages.dev/"
 
 app = Flask(__name__)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 install_cors(app)
 
-def log(message):
-    print(f"[{datetime.now():%H:%M:%S}] [app] {message}", flush=True)
+# Fallback stream URL with active token parameters
+DEFAULT_STREAM = CFG.get("stream_url") or "https://jiotvpllive.cdn.jio.com/bpk-tv/ZeeThiraiHD_BTS/WDVLive/index.mpd?__hdnea__=st=1792502910~exp=1792506510~acl=/bpk-tv/ZeeThiraiHD_BTS/WDVLive/*~hmac=fe0f6800c84c29f75c42f8e05457c3cb05c413d77e50daed218a52b53f06e7f5"
+ACTIVE_STREAM = DEFAULT_STREAM
 
-def origin_of(url):
-    parsed = urlparse(url or "")
-    if parsed.scheme and parsed.netloc:
-        return f"{parsed.scheme}://{parsed.netloc}"
-    return ""
-
-PAGE_URL = CFG.get("page_url") or "https://jjtvxweb.pages.dev/pind?id=3051"
 ACCESS_KEY = os.environ.get("ACCESS_KEY", "").strip()
-CHANNEL_NAME = CFG.get("channel_name", "Zee Thirai HD")
-CHANNEL_ID = CFG.get("channel_id", "zeethirai")
-CHANNEL_REFERER = CFG.get("referer") or "https://jjtvxweb.pages.dev/"
-CHANNEL_LOGO = "https://jiotvimages.cdn.jio.com/dare_images/images/ZeeThiraiHD.png"
 
 def key_ok():
     return not ACCESS_KEY or request.args.get("key", "") == ACCESS_KEY
 
-def fetch_fresh_stream():
-    headers = {
-        "User-Agent": USER_AGENT,
-        "Referer": CHANNEL_REFERER,
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-    }
-    kwargs = {"headers": headers, "timeout": 10, "allow_redirects": True}
-    if HTTP_IMPERSONATE:
-        kwargs["impersonate"] = HTTP_IMPERSONATE
-
-    try:
-        resp = http_client.get(PAGE_URL, **kwargs)
-        if resp.status_code == 200:
-            match = re.search(r'https?://[^\s<>"]+?\.(?:mpd|m3u8)[^\s<>"]*', resp.text)
-            if match:
-                return match.group(0)
-    except Exception as exc:
-        log(f"Failed to fetch fresh stream: {exc}")
-    
-    return "https://jiotvpllive.cdn.jio.com/bpk-tv/ZeeThiraiHD_BTS/WDVLive/index.mpd"
-
 @app.post("/api/target")
 def api_target():
+    global ACTIVE_STREAM
     body = request.get_json(silent=True) or {}
     value = str(body.get("page_url") or body.get("stream_url") or "").strip()
     if not value:
-        return jsonify({"error": "Paste a URL"}), 400
-    global PAGE_URL
-    PAGE_URL = value
+        return jsonify({"error": "Provide a stream URL"}), 400
+    ACTIVE_STREAM = value
     return jsonify({"ok": True, "url": value}), 200
 
 @app.get("/api/stream")
 def api_stream():
-    url = fetch_fresh_stream()
     return jsonify({
-        "url": url,
-        "proxy_url": "/proxy?url=" + quote(url, safe=""),
+        "url": ACTIVE_STREAM,
+        "proxy_url": "/proxy?url=" + quote(ACTIVE_STREAM, safe=""),
         "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     })
 
 @app.get("/api/status")
 def api_status():
-    url = fetch_fresh_stream()
     return jsonify({
-        "url": url,
+        "url": ACTIVE_STREAM,
         "live_mode": "direct",
         "http_client": "curl_cffi" if HTTP_IMPERSONATE else "requests",
-        "stream_kind": "dash" if ".mpd" in url.lower() else "hls"
+        "stream_kind": "dash" if ".mpd" in ACTIVE_STREAM.lower() else "hls"
     })
 
 @app.get("/proxy")
@@ -110,8 +75,8 @@ def proxy():
     
     headers = {
         "User-Agent": USER_AGENT,
-        "Referer": CHANNEL_REFERER,
-        "Origin": origin_of(CHANNEL_REFERER)
+        "Referer": REFERER,
+        "Origin": "https://jjtvxweb.pages.dev"
     }
     kwargs = {"headers": headers, "stream": True, "timeout": (10, 30), "allow_redirects": True}
     if HTTP_IMPERSONATE:
@@ -145,25 +110,22 @@ def playlist_m3u():
     if not key_ok():
         return Response("Forbidden", status=403)
     
-    url = fetch_fresh_stream()
-    parsed_url = urlparse(url)
+    parsed_url = urlparse(ACTIVE_STREAM)
     query_string = parsed_url.query
 
     lines = [
         "#EXTM3U",
-        f'#EXTINF:-1 tvg-id="{CHANNEL_ID}" tvg-name="{CHANNEL_NAME}" tvg-logo="{CHANNEL_LOGO}" group-title="Tamil",{CHANNEL_NAME}',
+        '#EXTINF:-1 tvg-id="zeethirai" tvg-name="Zee Thirai HD" tvg-logo="https://jiotvimages.cdn.jio.com/dare_images/images/ZeeThiraiHD.png" group-title="Movies" http-user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36" http-referrer="https://jjtvxweb.pages.dev/" referrer="https://jjtvxweb.pages.dev/",Zee Thirai HD',
         '#KODIPROP:inputstream.adaptive.license_type=clearkey',
         '#KODIPROP:inputstream.adaptive.license_key={"58d0716748ee52f4a55cf7baa6e072bb":"8fc185a1015f026fec82236bb0e096f4","c2d762acbea256c0bd67b92d59f69757":"46c59697457af3a687426a4691393774"}',
+        '#EXTVLCOPT:http-referrer=https://jjtvxweb.pages.dev/',
+        '#EXTVLCOPT:http-origin=https://jjtvxweb.pages.dev',
+        '#EXTVLCOPT:http-user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"',
     ]
-    if CHANNEL_REFERER:
-        lines.append(f"#EXTVLCOPT:http-referrer={CHANNEL_REFERER}")
-        lines.append(f"#EXTVLCOPT:http-origin={origin_of(CHANNEL_REFERER)}")
-    lines.append(f"#EXTVLCOPT:http-user-agent={USER_AGENT}")
-    
     if query_string:
         lines.append(f'#EXTHTTP:{{"cookie":"{query_string}"}}')
 
-    lines.append(url)
+    lines.append(ACTIVE_STREAM)
     return Response("\n".join(lines) + "\n",
                     content_type="audio/x-mpegurl; charset=utf-8",
                     headers={"Cache-Control": "no-cache"})
@@ -172,19 +134,9 @@ def playlist_m3u():
 def live_m3u8():
     if not key_ok():
         return Response("Forbidden", status=403)
-    url = fetch_fresh_stream()
-    resp = redirect(url, code=302)
+    resp = redirect(ACTIVE_STREAM, code=302)
     resp.headers["Cache-Control"] = "no-cache, no-store"
     return resp
-
-@app.get("/api/keys")
-def api_keys():
-    return jsonify({
-        "keys": {
-            "58d0716748ee52f4a55cf7baa6e072bb": "8fc185a1015f026fec82236bb0e096f4",
-            "c2d762acbea256c0bd67b92d59f69757": "46c59697457af3a687426a4691393774"
-        }
-    })
 
 @app.get("/")
 def index():
