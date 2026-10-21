@@ -1,23 +1,211 @@
-from flask import Flask, Response, jsonify
+"""
+Stream Capture server with Dynamic Clearkey & Token Integration.
+  - Capture thread finds the current stream link from the Jio page (capture.py).
+  - /live.m3u8 and /playlist.m3u give OTT Navigator a stable channel link.
+  - /api/status, /api/stream, /api/refresh are used by keeper.sh and the web page.
+"""
+
+import json
 import os
+import threading
+import time
+import traceback
+from datetime import datetime, timezone
+from pathlib import Path
+
+from flask import Flask, Response, jsonify, redirect, request, send_from_directory
+from werkzeug.middleware.proxy_fix import ProxyFix
+
+from capture import STAGE, capture_once, request_reload, token_expired
+from cors import install_cors
+
+BASE_DIR = Path(__file__).resolve().parent
+CFG = json.loads((BASE_DIR / "config.json").read_text(encoding="utf-8"))
+
+ACCESS_KEY = os.environ.get("ACCESS_KEY", "").strip()
+LIVE_WAIT_S = int(os.environ.get("LIVE_WAIT_S", "25"))  # keep under the player's timeout
+CHANNEL_NAME = CFG.get("channel_name", "Zee Thirai HD")
+CHANNEL_ID = CFG.get("channel_id", "3051")
+CHANNEL_LOGO = CFG.get("channel_logo", "https://jiotvimages.cdn.jio.com/dare_images/images/ZeeThiraiHD.png")
+CHANNEL_GROUP = CFG.get("channel_group", "Tamil")
+USER_AGENT = CFG.get("user_agent", "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36")
+REFERER = CFG.get("referer", "https://jjtvxweb.pages.dev/")
+
+# Clearkey mapping dictionary for DRM protected streams
+CLEARKEY_KEYS = {
+    "58d0716748ee52f4a55cf7baa6e072bb": "8fc185a1015f026fec82236bb0e096f4",
+    "c2d762acbea256c0bd67b92d59f69757": "46c59697457af3a687426a4691393774"
+}
+
+LOCK = threading.Lock()
+WAKE = threading.Event()
 
 app = Flask(__name__)
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
+install_cors(app)
 
-@app.route('/playlist.m3u')
-def generate_playlist():
-    hdnea_token = "st=1792572197~exp=1792575797~acl=/bpk-tv/ZeeThiraiHD_BTS/WDVLive/*~hmac=f18cc023bf34c508140e33ef802cce2aaa2b39aedfd1aa438ac330fa66af6fa0"
-    mpd_url = f"https://jiotvpllive.cdn.jio.com/bpk-tv/ZeeThiraiHD_BTS/WDVLive/index.mpd?__hdnea__={hdnea_token}"
+STATE = {
+    "page_url": CFG.get("page_url", "https://jjtvxweb.pages.dev/pind?id=3051"),
+    "manual_url": None,
+    "url": None,
+    "updated_at": None,
+    "last_error": None,
+    "cycles": 0,
+}
+
+
+def log(message):
+    print(f"[{datetime.now():%H:%M:%S}] [app] {message}", flush=True)
+
+
+def now_iso():
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def key_ok():
+    return not ACCESS_KEY or request.args.get("key", "") == ACCESS_KEY
+
+
+def fresh_url():
+    with LOCK:
+        url = STATE["url"]
+    return url if url and not token_expired(url) else None
+
+
+def capture_loop():
+    log("Capture loop started.")
+    while True:
+        with LOCK:
+            page_url = STATE["page_url"]
+            manual = STATE["manual_url"]
+            STATE["cycles"] += 1
+            cycle = STATE["cycles"]
+
+        if manual or not page_url:
+            WAKE.wait(CFG.get("refresh_interval_s", 5))
+            WAKE.clear()
+            continue
+
+        log(f"Cycle {cycle} on {page_url}")
+        try:
+            url = capture_once({**CFG, "page_url": page_url})
+            with LOCK:
+                if STATE["page_url"] == page_url and not STATE["manual_url"]:
+                    if url and not token_expired(url):
+                        if url != STATE["url"]:
+                            STATE["url"] = url
+                            STATE["updated_at"] = now_iso()
+                        STATE["last_error"] = None
+                    else:
+                        STATE["last_error"] = STAGE.get("error") or "No fresh stream found"
+        except Exception as exc:
+            log(f"Cycle {cycle} failed:\n{traceback.format_exc()}")
+            with LOCK:
+                STATE["last_error"] = f"{type(exc).__name__}: {exc}"
+
+        with LOCK:
+            if STATE["url"] and token_expired(STATE["url"]):
+                log("Stored link expired, clearing it.")
+                STATE["url"] = None
+                STATE["last_error"] = "Stream token expired, waiting for a fresh one"
+        WAKE.wait(CFG.get("refresh_interval_s", 5))
+        WAKE.clear()
+
+
+@app.get("/api/status")
+def api_status():
+    with LOCK:
+        data = dict(STATE)
+    data["stage"] = dict(STAGE)
+    data["live_mode"] = "direct"
+    url = data.get("url") or ""
+    data["stream_kind"] = "dash" if ".mpd" in url.lower() else ("hls" if ".m3u8" in url.lower() else None)
+    return jsonify(data)
+
+
+@app.get("/api/stream")
+def api_stream():
+    url = fresh_url()
+    if not url:
+        with LOCK:
+            err = STATE["last_error"]
+        return jsonify({"error": "No fresh stream captured yet", "last_error": err}), 404
+    return jsonify({
+        "url": url, 
+        "updated_at": STATE["updated_at"],
+        "keys": CLEARKEY_KEYS
+    })
+
+
+@app.post("/api/refresh")
+def api_refresh():
+    request_reload()
+    WAKE.set()
+    log("Refresh requested.")
+    return jsonify({"ok": True}), 202
+
+
+@app.get("/playlist.m3u")
+def playlist_m3u():
+    if not key_ok():
+        return Response("Forbidden", status=403)
+    base = request.host_url.rstrip("/")
+    key_q = f"?key={ACCESS_KEY}" if ACCESS_KEY else ""
+    logo = f' tvg-logo="{CHANNEL_LOGO}"' if CHANNEL_LOGO else ""
     
-    m3u_content = f"""#EXTM3U
-#EXTINF:-1 tvg-id="3051" tvg-logo="https://jiotvimages.cdn.jio.com/dare_images/images/ZeeThiraiHD.png" group-title="Tamil" http-user-agent="Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36",Zee Thirai HD
-#KODIPROP:inputstream.adaptive.license_type=clearkey
-#KODIPROP:inputstream.adaptive.license_key={{"58d0716748ee52f4a55cf7baa6e072bb":"8fc185a1015f026fec82236bb0e096f4","c2d762acbea256c0bd67b92d59f69757":"46c59697457af3a687426a4691393774"}}
-#EXTVLCOPT:http-user-agent=Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36
-#EXTHTTP:{{"cookie":"__hdnea__={hdnea_token}"}}
-{mpd_url}
-"""
-    return Response(m3u_content, mimetype="audio/x-mpegurl")
+    # Extract cookies / token parameters from current fresh url if available
+    url = fresh_url()
+    hdnea_cookie = ""
+    if url and "__hdnea__=" in url:
+        hdnea_cookie = url.split("__hdnea__=")[1]
 
-if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
+    lines = [
+        "#EXTM3U",
+        f'#EXTINF:-1 tvg-id="{CHANNEL_ID}" tvg-name="{CHANNEL_NAME}"{logo} group-title="{CHANNEL_GROUP}",{CHANNEL_NAME}',
+        '#KODIPROP:inputstream.adaptive.license_type=clearkey',
+        f'#KODIPROP:inputstream.adaptive.license_key={json.dumps(CLEARKEY_KEYS)}'
+    ]
+    if REFERER:
+        lines.append(f"#EXTVLCOPT:http-referrer={REFERER}")
+        lines.append(f"#EXTVLCOPT:http-origin={REFERER}")
+    if USER_AGENT:
+        lines.append(f"#EXTVLCOPT:http-user-agent={USER_AGENT}")
+    if hdnea_cookie:
+        lines.append(f'#EXTHTTP:{json.dumps({"cookie": f"__hdnea__={hdnea_cookie}"})}')
+        
+    lines.append(f"{base}/live.m3u8{key_q}")
+    return Response("\n".join(lines) + "\n", content_type="audio/x-mpegurl; charset=utf-8",
+                    headers={"Cache-Control": "no-cache"})
+
+
+@app.get("/live.m3u8")
+def live_m3u8():
+    if not key_ok():
+        return Response("Forbidden", status=403)
+    url = fresh_url()
+    if not url:
+        request_reload()
+        WAKE.set()
+        deadline = time.monotonic() + LIVE_WAIT_S
+        while time.monotonic() < deadline and not url:
+            time.sleep(1)
+            url = fresh_url()
+    if not url:
+        return Response("Stream is starting, retry in about 10 seconds.",
+                        status=503, headers={"Retry-After": "10"})
+    resp = redirect(url, code=302)
+    resp.headers["Cache-Control"] = "no-cache, no-store"
+    return resp
+
+
+@app.get("/")
+def index():
+    if (BASE_DIR / "static" / "index.html").exists():
+        return send_from_directory(BASE_DIR / "static", "index.html")
+    return "Auto Stream M3U Server Running Successfully! 🚀", 200
+
+
+threading.Thread(target=capture_loop, daemon=True).start()
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8000)), threaded=True)
