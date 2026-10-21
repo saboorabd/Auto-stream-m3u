@@ -1,6 +1,7 @@
 #!/bin/sh
 # Starts a virtual screen (Xvfb) for Chromium, waits until it is ready,
-# then runs the app. If the app crashes, it restarts after 2 seconds.
+# starts the keeper (keeps a fresh link ready), then runs the app.
+# If the app crashes, it restarts after 2 seconds.
 
 echo "Starting Stream Capture..."
 
@@ -20,6 +21,9 @@ fi
 
 export DISPLAY=:99
 echo "DISPLAY=$DISPLAY"
+
+# Keeper: refreshes the stream link before it expires. Waits for the app itself.
+sh /app/keeper.sh &
 
 while true; do
   python app.py
