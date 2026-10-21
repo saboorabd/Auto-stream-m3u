@@ -90,7 +90,7 @@ def capture_loop():
                         if url != STATE["url"]:
                             STATE["url"] = url
                             STATE["updated_at"] = now_iso()
-                        STATE["last_error"] = None
+                            STATE["last_error"] = None
                     else:
                         STATE["last_error"] = STAGE.get("error") or "No fresh stream found"
         except Exception as exc:
