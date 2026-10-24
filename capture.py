@@ -25,6 +25,16 @@ SEEN_CAP = 500
 POLL_S = 1.0
 SLOW_SCAN_S = 10.0
 
+# Ad / tracker domains that break the player page on a server browser.
+# A phone with an ad blocker shows these as ERR_BLOCKED_BY_CLIENT, so we block them too.
+AD_HOSTS = (
+    "al5sm.com",
+    "realizationnewestfangs.com",
+    "portalfluently.com",
+    "protrafficinspector.com",
+    "veilimportantly.com",
+)
+
 REFRESH = threading.Event()
 M3U8_RE = re.compile(r'https?:[^\s"\'<>]*?\.(?:m3u8|mpd)[^\s"\'<>]*', re.IGNORECASE)
 STREAM_HINTS = (".m3u8", ".mpd")
@@ -91,6 +101,14 @@ IS_EXTENSION_PAGE_JS = """
 
 TOKEN_MARGIN_S = 60
 
+
+def _block_ads(route):
+    """Aborts requests to ad/tracker hosts, continues everything else."""
+    if any(host in route.request.url for host in AD_HOSTS):
+        return route.abort()
+    return route.continue_()
+
+
 def token_expired(url, margin=TOKEN_MARGIN_S):
     if not url:
         return False
@@ -104,13 +122,16 @@ def token_expired(url, margin=TOKEN_MARGIN_S):
             return int(match.group(1)) - margin <= time.time()
     return False
 
+
 def request_reload():
     REFRESH.set()
+
 
 def set_stage(name):
     STAGE["name"] = name
     STAGE["since"] = datetime.now().isoformat(timespec="seconds")
     print(f"[{datetime.now():%H:%M:%S}] [capture] {name}", flush=True)
+
 
 def _empty_session():
     return {
@@ -120,11 +141,14 @@ def _empty_session():
         "store_hits": [], "source_hits": [], "last_slow": 0.0, "last_found": None,
     }
 
+
 _session = _empty_session()
+
 
 def ext_id_for_path(path):
     digest = hashlib.sha256(os.path.abspath(path).encode("utf-8")).hexdigest()[:32]
     return "".join(chr(ord("a") + int(c, 16)) for c in digest)
+
 
 def discover_extensions():
     found = []
@@ -149,6 +173,7 @@ def discover_extensions():
         })
     return found
 
+
 def resolve_ids(context, exts):
     for worker in context.service_workers:
         try:
@@ -160,12 +185,14 @@ def resolve_ids(context, exts):
             if ext["name"] == name:
                 ext["id"] = real_id
 
+
 def verify_vle(popup, ext):
     try:
         popup.goto(f"chrome-extension://{ext['id']}/{ext['popup']}", timeout=15_000)
         return bool(popup.evaluate(IS_EXTENSION_PAGE_JS))
-    except Exception as exc:
+    except Exception:
         return False
+
 
 def safe_eval(page, script, arg=None):
     try:
@@ -175,9 +202,11 @@ def safe_eval(page, script, arg=None):
     except Exception:
         return None
 
+
 def collect_vle(popup):
     result = safe_eval(popup, COLLECT_LINKS_JS) or []
     return [i["url"] for i in result if i.get("url")]
+
 
 def scan_store_popups(scan_tab, exts):
     hits = []
@@ -195,6 +224,7 @@ def scan_store_popups(scan_tab, exts):
             continue
     return hits
 
+
 def scan_page_sources(page):
     found = []
     for frame in page.frames:
@@ -204,6 +234,7 @@ def scan_page_sources(page):
             continue
         found.extend(M3U8_RE.findall(html))
     return found
+
 
 def open_session(cfg):
     exts = discover_extensions()
@@ -232,6 +263,10 @@ def open_session(cfg):
             kwargs["proxy"] = {"server": PROXY_URL}
 
         context = pw.chromium.launch_persistent_context(profile, **kwargs)
+
+        # Block ad/tracker hosts before any page loads, the same way an ad blocker does on a phone.
+        context.route("**/*", _block_ads)
+
         seen = []
 
         def on_request(request):
@@ -266,6 +301,7 @@ def open_session(cfg):
                     vle_ready=vle_ready, seen=seen)
     set_stage("chrome_started")
 
+
 def close_session():
     try:
         if _session["context"]:
@@ -281,6 +317,7 @@ def close_session():
         shutil.rmtree(_session["profile"], ignore_errors=True)
     _session.clear()
     _session.update(_empty_session())
+
 
 def click_play(page, selectors):
     if not selectors:
@@ -298,12 +335,14 @@ def click_play(page, selectors):
                 continue
     return False
 
+
 def start_video(page):
     for frame in page.frames:
         try:
             frame.evaluate(PLAY_VIDEO_JS)
         except Exception:
             pass
+
 
 def needs_load(cfg):
     if _session["loaded_url"] != cfg["page_url"]:
@@ -313,6 +352,7 @@ def needs_load(cfg):
     if time.monotonic() - _session["loaded_at"] > cfg.get("reload_after_s", 1800):
         return True
     return False
+
 
 def load_page(cfg):
     REFRESH.clear()
@@ -335,6 +375,7 @@ def load_page(cfg):
     set_stage("page_loaded")
     set_stage("waiting_for_stream")
 
+
 def pick(pattern, *groups):
     stale = False
     for group in groups:
@@ -345,6 +386,7 @@ def pick(pattern, *groups):
         if fresh:
             return fresh[-1], stale
     return None, stale
+
 
 def capture_once(cfg):
     pattern = re.compile(cfg["stream_pattern"], re.IGNORECASE)
@@ -392,7 +434,7 @@ def capture_once(cfg):
 
             if time.monotonic() >= deadline:
                 break
-            page.wait_for_timeout(int(POLS * 1000) if 'POLS' in globals() else 1000)
+            page.wait_for_timeout(int(POLL_S * 1000))
 
         _session["loaded_url"] = None
         set_stage("timeout_no_stream")
