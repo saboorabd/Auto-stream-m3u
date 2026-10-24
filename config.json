@@ -5,14 +5,11 @@
   "channel_logo": "https://jiotvimages.cdn.jio.com/dare_images/images/ZeeThiraiHD.png",
   "channel_group": "Movies",
   "referer": "https://jjtvxweb.pages.dev",
-  "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+  "user_agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36",
   "play_selectors": [
-    "video",
-    "#player-container",
-    ".shaka-play-button",
-    ".shaka-big-play-button",
-    "div[class*='play']",
-    "button[class*='play']"
+    "button.shaka-play-button[aria-label='Play']",
+    ".shaka-big-play-button[aria-label='Play']",
+    "#player-container"
   ],
   "stream_pattern": "ZeeThiraiHD_BTS.*\\.(?:m3u8|mpd)",
   "capture_timeout_s": 60,
