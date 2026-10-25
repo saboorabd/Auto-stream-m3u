@@ -4,8 +4,9 @@ Build-time downloader for the browser extensions.
   video_link_extractor : GitHub source ZIP (jrcramos/video_link_extractor)
   stream_detector      : Chrome Web Store CRX
   m3u8_sniffer         : Chrome Web Store CRX
+  mpd_detector         : Chrome Web Store CRX
 
-Each extension is unpacked into /opt/extensions/<name>/.
+Each extension is unpacked into /opt/extensions/<n>/.
 A failed download is reported and skipped, so the build still succeeds.
 The app runs without any of them (network and page-source sniffing still work).
 """
@@ -29,6 +30,7 @@ SOURCES = {
     },
     "stream_detector": {"store_id": "iakkmkmhhckcmoiibcfjnooibphlobak"},
     "m3u8_sniffer": {"store_id": "akkncdpkjlfanomlnpmmolafofpnpjgn"},
+    "mpd_detector": {"store_id": "lpoohbdbmggiknlpcmhhdkpaclfcdapk"},
 }
 
 
