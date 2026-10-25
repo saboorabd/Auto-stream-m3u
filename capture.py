@@ -302,6 +302,8 @@ def open_session(cfg):
             vle = next((e for e in exts if e["is_vle"]), None)
             if vle:
                 vle_ready = verify_vle(vle_popup, vle)
+        print(f"[capture] extensions loaded: {[e['name'] for e in exts]} | vle_ready={vle_ready}",
+              flush=True)
     except Exception:
         shutil.rmtree(profile, ignore_errors=True)
         pw.stop()
