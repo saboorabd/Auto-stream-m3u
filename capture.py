@@ -24,6 +24,7 @@ PROXY_URL = os.environ.get("PROXY_URL", "").strip()
 SEEN_CAP = 500
 POLL_S = 1.0
 SLOW_SCAN_S = 10.0
+STALE_GRACE_S = 20.0  # after seeing only an expired token, give the player this long before one reload
 
 REFRESH = threading.Event()
 M3U8_RE = re.compile(r'https?:[^\s"\'<>]*?\.(?:m3u8|mpd)[^\s"\'<>]*', re.IGNORECASE)
@@ -355,8 +356,7 @@ def load_page(cfg):
 
 
 def pick(pattern, *groups):
-    """Returns the newest FRESH matching link. 'stale' only reports that expired links were seen,
-    for logging. It never triggers a page reload."""
+    """Returns the newest FRESH matching link, and whether any expired match was seen."""
     stale = False
     for group in groups:
         matches = [u for u in group if pattern.search(u) and "zeethirai" in u.lower()]
@@ -382,7 +382,8 @@ def capture_once(cfg):
 
         page = _session["page"]
         deadline = time.monotonic() + cfg["capture_timeout_s"]
-        logged_stale = False
+        stale_since = None
+        reloaded_for_token = False
 
         while True:
             if not _session["clicked"]:
@@ -405,9 +406,19 @@ def capture_once(cfg):
                 set_stage("stream_found")
                 return found
 
-            if stale and not logged_stale:
-                logged_stale = True
-                print("[capture] expired ZeeThirai token seen, waiting for a fresh one", flush=True)
+            # Only expired links seen. Give the player a grace period first.
+            # If still nothing fresh after the grace period, reload the page once.
+            if stale:
+                if stale_since is None:
+                    stale_since = time.monotonic()
+                    print("[capture] expired ZeeThirai token seen, waiting for a fresh one", flush=True)
+                elif not reloaded_for_token and time.monotonic() - stale_since > STALE_GRACE_S:
+                    reloaded_for_token = True
+                    stale_since = None
+                    print("[capture] still only expired token, reloading page once", flush=True)
+                    load_page(cfg)
+                    deadline = max(deadline, time.monotonic() + cfg["capture_timeout_s"])
+                    continue
 
             if time.monotonic() >= deadline:
                 break
