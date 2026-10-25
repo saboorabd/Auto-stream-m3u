@@ -1,5 +1,14 @@
 """
-Warm-browser capture with ZeeThirai Stream Filtering.
+Warm-browser capture for the ZeeThirai stream.
+
+The browser stays open and keeps the page playing. The newest FRESH ZeeThirai
+manifest request (.mpd or .m3u8) is returned. Expired tokens are never returned.
+The page is reloaded only when:
+  - it is first opened, or the target page changed
+  - a viewer asked for a refresh (request_reload)
+  - it has been loaded for reload_after_s
+  - only expired tokens were seen for STALE_GRACE_S seconds (reloaded once)
+  - nothing fresh was found within capture_timeout_s
 """
 
 import hashlib
@@ -24,7 +33,8 @@ PROXY_URL = os.environ.get("PROXY_URL", "").strip()
 SEEN_CAP = 500
 POLL_S = 1.0
 SLOW_SCAN_S = 10.0
-STALE_GRACE_S = 20.0  # after seeing only an expired token, give the player this long before one reload
+STALE_GRACE_S = 20.0
+TOKEN_MARGIN_S = 60
 
 REFRESH = threading.Event()
 M3U8_RE = re.compile(r'https?:[^\s"\'<>]*?\.(?:m3u8|mpd)[^\s"\'<>]*', re.IGNORECASE)
@@ -51,6 +61,19 @@ CLICK_PLAY_JS = """
     if (el) { el.click(); return sel; }
   }
   return null;
+}
+"""
+
+PLAYER_STATE_JS = """
+() => {
+  const btn = document.querySelector('.shaka-play-button');
+  const v = document.querySelector('video');
+  return {
+    play_button_label: btn ? btn.getAttribute('aria-label') : null,
+    video_paused: v ? v.paused : null,
+    video_ready_state: v ? v.readyState : null,
+    video_src_kind: v ? (v.currentSrc || v.src || '').slice(0, 5) : null
+  };
 }
 """
 
@@ -90,10 +113,9 @@ IS_EXTENSION_PAGE_JS = """
 () => typeof chrome !== 'undefined' && !!chrome.runtime && !!chrome.runtime.id
 """
 
-TOKEN_MARGIN_S = 60
-
 
 def token_expired(url, margin=TOKEN_MARGIN_S):
+    """True if the URL's exp= time (e.g. __hdnea__=...~exp=...) has passed."""
     if not url:
         return False
     parsed = urlparse(url)
@@ -220,6 +242,16 @@ def scan_page_sources(page):
     return found
 
 
+def player_state(page):
+    """Reads the player state from every frame, for diagnosis when nothing plays."""
+    states = []
+    for frame in page.frames:
+        state = safe_eval(frame, PLAYER_STATE_JS)
+        if state:
+            states.append(state)
+    return states
+
+
 def open_session(cfg):
     exts = discover_extensions()
     profile = tempfile.mkdtemp(prefix="vle-")
@@ -304,11 +336,13 @@ def click_play(page, selectors):
     for frame in page.frames:
         result = safe_eval(frame, CLICK_PLAY_JS, selectors)
         if result:
+            print(f"[capture] JS-clicked '{result}'", flush=True)
             return True
     for frame in page.frames:
         for selector in selectors:
             try:
                 frame.click(selector, timeout=800)
+                print(f"[capture] clicked '{selector}'", flush=True)
                 return True
             except Exception:
                 continue
@@ -318,7 +352,10 @@ def click_play(page, selectors):
 def start_video(page):
     for frame in page.frames:
         try:
-            frame.evaluate(PLAY_VIDEO_JS)
+            frame.evaluate("""() => {
+              const v = document.querySelector('video');
+              if (v) { v.muted = true; v.play().catch(() => {}); }
+            }""")
         except Exception:
             pass
 
@@ -356,7 +393,8 @@ def load_page(cfg):
 
 
 def pick(pattern, *groups):
-    """Returns the newest FRESH matching link, and whether any expired match was seen."""
+    """Newest FRESH matching link from the first group that has one.
+    Also reports whether any expired match was seen."""
     stale = False
     for group in groups:
         matches = [u for u in group if pattern.search(u) and "zeethirai" in u.lower()]
@@ -406,8 +444,7 @@ def capture_once(cfg):
                 set_stage("stream_found")
                 return found
 
-            # Only expired links seen. Give the player a grace period first.
-            # If still nothing fresh after the grace period, reload the page once.
+            # Only expired links seen: wait a grace period, then reload once.
             if stale:
                 if stale_since is None:
                     stale_since = time.monotonic()
@@ -424,11 +461,25 @@ def capture_once(cfg):
                 break
             page.wait_for_timeout(int(POLL_S * 1000))
 
+        # Nothing fresh within the timeout. Record what the player looked like.
         _session["loaded_url"] = None
+        diag = {
+            "diagnosis": "No fresh stream found. See 'player' and 'network_stream_seen'.",
+            "clicked_play": _session["clicked"],
+            "vle_ready": _session["vle_ready"],
+            "frames": len(page.frames),
+            "network_stream_seen": len(_session["seen"]),
+            "page_source_hits": len(_session["source_hits"]),
+            "store_popup_hits": len(_session["store_hits"]),
+            "player": player_state(page),
+        }
+        STAGE["error"] = json.dumps(diag, ensure_ascii=False)
+        print(f"[capture] DIAGNOSIS: {STAGE['error']}", flush=True)
         set_stage("timeout_no_stream")
         return None
 
     except Exception as exc:
         STAGE["error"] = f"{type(exc).__name__}: {exc}"
+        print(f"[capture] failed, resetting browser: {STAGE['error']}", flush=True)
         close_session()
         raise
