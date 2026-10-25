@@ -33,19 +33,12 @@ PROXY_URL = os.environ.get("PROXY_URL", "").strip()
 SEEN_CAP = 500
 POLL_S = 1.0
 SLOW_SCAN_S = 10.0
-STALE_GRACE_S = 20.0
+STALE_GRACE_S = 45.0
 TOKEN_MARGIN_S = 60
 
 REFRESH = threading.Event()
 M3U8_RE = re.compile(r'https?:[^\s"\'<>]*?\.(?:m3u8|mpd)[^\s"\'<>]*', re.IGNORECASE)
 STREAM_HINTS = (".m3u8", ".mpd")
-
-PLAY_VIDEO_JS = """
-() => {
-  const v = document.querySelector('video');
-  if (v) { v.muted = true; v.play().catch(() => {}); }
-}
-"""
 
 CLICK_PLAY_JS = """
 (selectors) => {
@@ -74,6 +67,13 @@ PLAYER_STATE_JS = """
     video_ready_state: v ? v.readyState : null,
     video_src_kind: v ? (v.currentSrc || v.src || '').slice(0, 5) : null
   };
+}
+"""
+
+PLAY_VIDEO_JS = """
+() => {
+  const v = document.querySelector('video');
+  if (v) { v.muted = true; v.play().catch(() => {}); }
 }
 """
 
@@ -351,13 +351,7 @@ def click_play(page, selectors):
 
 def start_video(page):
     for frame in page.frames:
-        try:
-            frame.evaluate("""() => {
-              const v = document.querySelector('video');
-              if (v) { v.muted = true; v.play().catch(() => {}); }
-            }""")
-        except Exception:
-            pass
+        safe_eval(frame, PLAY_VIDEO_JS)
 
 
 def needs_load(cfg):
@@ -444,7 +438,7 @@ def capture_once(cfg):
                 set_stage("stream_found")
                 return found
 
-            # Only expired links seen: wait a grace period, then reload once.
+            # Only expired links seen: wait the grace period, then reload once.
             if stale:
                 if stale_since is None:
                     stale_since = time.monotonic()
