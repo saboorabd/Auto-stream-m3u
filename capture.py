@@ -3,12 +3,8 @@ Warm-browser capture for the ZeeThirai stream.
 
 The browser stays open and keeps the page playing. The newest FRESH ZeeThirai
 manifest request (.mpd or .m3u8) is returned. Expired tokens are never returned.
-The page is reloaded only when:
-  - it is first opened, or the target page changed
-  - a viewer asked for a refresh (request_reload)
-  - it has been loaded for reload_after_s
-  - only expired tokens were seen for STALE_GRACE_S seconds (reloaded once)
-  - nothing fresh was found within capture_timeout_s
+When only expired tokens are seen, the page's site storage is cleared and the
+page is reloaded (up to MAX_TOKEN_RELOADS times per capture).
 """
 
 import hashlib
@@ -33,7 +29,8 @@ PROXY_URL = os.environ.get("PROXY_URL", "").strip()
 SEEN_CAP = 500
 POLL_S = 1.0
 SLOW_SCAN_S = 10.0
-STALE_GRACE_S = 45.0
+STALE_GRACE_S = 8.0          # a player will not refresh an old token by itself, so act quickly
+MAX_TOKEN_RELOADS = 3        # per capture_once() call
 TOKEN_MARGIN_S = 60
 
 REFRESH = threading.Event()
@@ -54,6 +51,14 @@ CLICK_PLAY_JS = """
     if (el) { el.click(); return sel; }
   }
   return null;
+}
+"""
+
+CLEAR_STORAGE_JS = """
+() => {
+  try { localStorage.clear(); } catch (e) {}
+  try { sessionStorage.clear(); } catch (e) {}
+  return true;
 }
 """
 
@@ -114,10 +119,10 @@ IS_EXTENSION_PAGE_JS = """
 """
 
 
-def token_expired(url, margin=TOKEN_MARGIN_S):
-    """True if the URL's exp= time (e.g. __hdnea__=...~exp=...) has passed."""
+def token_exp(url):
+    """Returns the exp= timestamp of a tokenized URL (e.g. __hdnea__=...~exp=...), or None."""
     if not url:
-        return False
+        return None
     parsed = urlparse(url)
     candidates = []
     for values in parse_qs(parsed.query).values():
@@ -125,8 +130,20 @@ def token_expired(url, margin=TOKEN_MARGIN_S):
     for value in candidates:
         match = re.search(r"(?:^|[~;&=])exp=(\d{9,11})", value)
         if match:
-            return int(match.group(1)) - margin <= time.time()
-    return False
+            return int(match.group(1))
+    return None
+
+
+def token_expired(url, margin=TOKEN_MARGIN_S):
+    exp = token_exp(url)
+    return exp is not None and exp - margin <= time.time()
+
+
+def describe_expiry(url):
+    exp = token_exp(url)
+    if exp is None:
+        return "no exp"
+    return f"exp {int(exp - time.time()):+d}s from now"
 
 
 def request_reload():
@@ -243,13 +260,17 @@ def scan_page_sources(page):
 
 
 def player_state(page):
-    """Reads the player state from every frame, for diagnosis when nothing plays."""
     states = []
     for frame in page.frames:
         state = safe_eval(frame, PLAYER_STATE_JS)
         if state:
             states.append(state)
     return states
+
+
+def clear_site_storage(page):
+    for frame in page.frames:
+        safe_eval(frame, CLEAR_STORAGE_JS)
 
 
 def open_session(cfg):
@@ -389,17 +410,17 @@ def load_page(cfg):
 
 
 def pick(pattern, *groups):
-    """Newest FRESH matching link from the first group that has one.
-    Also reports whether any expired match was seen."""
-    stale = False
+    """Returns (newest FRESH matching link or None, a sample EXPIRED matching link or None)."""
+    expired_sample = None
     for group in groups:
         matches = [u for u in group if pattern.search(u) and "zeethirai" in u.lower()]
         fresh = [u for u in matches if not token_expired(u)]
-        if len(fresh) < len(matches):
-            stale = True
+        expired = [u for u in matches if token_expired(u)]
+        if expired and expired_sample is None:
+            expired_sample = expired[-1]
         if fresh:
-            return fresh[-1], stale
-    return None, stale
+            return fresh[-1], expired_sample
+    return None, expired_sample
 
 
 def capture_once(cfg):
@@ -417,7 +438,7 @@ def capture_once(cfg):
         page = _session["page"]
         deadline = time.monotonic() + cfg["capture_timeout_s"]
         stale_since = None
-        reloaded_for_token = False
+        token_reloads = 0
 
         while True:
             if not _session["clicked"]:
@@ -425,7 +446,7 @@ def capture_once(cfg):
             start_video(page)
 
             vle_hits = collect_vle(_session["vle_popup"]) if _session["vle_ready"] else []
-            found, stale = pick(pattern, vle_hits, list(_session["seen"]))
+            found, expired_sample = pick(pattern, vle_hits, list(_session["seen"]))
 
             if not found and time.monotonic() - _session["last_slow"] >= SLOW_SCAN_S:
                 _session["last_slow"] = time.monotonic()
@@ -440,15 +461,19 @@ def capture_once(cfg):
                 set_stage("stream_found")
                 return found
 
-            # Only expired links seen: wait the grace period, then reload once.
-            if stale:
+            # Only expired links are being requested. Clear site storage and reload,
+            # so the page asks for a new token. Give up after MAX_TOKEN_RELOADS.
+            if expired_sample:
                 if stale_since is None:
                     stale_since = time.monotonic()
-                    print("[capture] expired ZeeThirai token seen, waiting for a fresh one", flush=True)
-                elif not reloaded_for_token and time.monotonic() - stale_since > STALE_GRACE_S:
-                    reloaded_for_token = True
+                    print(f"[capture] expired ZeeThirai token ({describe_expiry(expired_sample)})",
+                          flush=True)
+                elif token_reloads < MAX_TOKEN_RELOADS and time.monotonic() - stale_since > STALE_GRACE_S:
+                    token_reloads += 1
                     stale_since = None
-                    print("[capture] still only expired token, reloading page once", flush=True)
+                    print(f"[capture] reloading with cleared site storage "
+                          f"({token_reloads}/{MAX_TOKEN_RELOADS})", flush=True)
+                    clear_site_storage(page)
                     load_page(cfg)
                     deadline = max(deadline, time.monotonic() + cfg["capture_timeout_s"])
                     continue
@@ -457,10 +482,10 @@ def capture_once(cfg):
                 break
             page.wait_for_timeout(int(POLL_S * 1000))
 
-        # Nothing fresh within the timeout. Record what the player looked like.
         _session["loaded_url"] = None
         diag = {
             "diagnosis": "No fresh stream found. See 'player' and 'network_stream_seen'.",
+            "token_reloads": token_reloads,
             "clicked_play": _session["clicked"],
             "vle_ready": _session["vle_ready"],
             "frames": len(page.frames),
