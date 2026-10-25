@@ -8,16 +8,12 @@
   "user_agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36",
   "play_selectors": [
     "button.shaka-play-button[aria-label='Play']",
-    ".shaka-big-play-button[aria-label='Play']",
-    "#player-container"
+    ".shaka-big-play-button",
+    "button.shaka-play-button"
   ],
   "stream_pattern": "ZeeThiraiHD_BTS.*\\.(?:m3u8|mpd)",
   "capture_timeout_s": 60,
   "refresh_interval_s": 5,
   "reload_after_s": 1800,
-  "headless": false,
-  "keys": {
-    "58d0716748ee52f4a55cf7baa6e072bb": "8fc185a1015f026fec82236bb0e096f4",
-    "c2d762acbea256c0bd67b92d59f69757": "46c59697457af3a687426a4691393774"
-  }
+  "headless": false
 }
