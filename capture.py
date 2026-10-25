@@ -1,5 +1,5 @@
 """
-Warm-browser capture with ZeeThirai Stream Filtering & ClearKey Integration.
+Warm-browser capture with ZeeThirai Stream Filtering.
 """
 
 import hashlib
@@ -24,21 +24,6 @@ PROXY_URL = os.environ.get("PROXY_URL", "").strip()
 SEEN_CAP = 500
 POLL_S = 1.0
 SLOW_SCAN_S = 10.0
-
-# Embedded ClearKey DRM Credentials (KID:KEY)
-CLEARKEYS = {
-    "58d0716748ee52f4a55cf7baa6e072bb": "8fc185a1015f026fec82236bb0e096f4",
-    "c2d762acbea256c0bd67b92d59f69757": "46c59697457af3a687426a4691393774",
-}
-
-# Ad / tracker domains that break the player page on a server browser.
-AD_HOSTS = (
-    "al5sm.com",
-    "realizationnewestfangs.com",
-    "portalfluently.com",
-    "protrafficinspector.com",
-    "veilimportantly.com",
-)
 
 REFRESH = threading.Event()
 M3U8_RE = re.compile(r'https?:[^\s"\'<>]*?\.(?:m3u8|mpd)[^\s"\'<>]*', re.IGNORECASE)
@@ -105,13 +90,6 @@ IS_EXTENSION_PAGE_JS = """
 """
 
 TOKEN_MARGIN_S = 60
-
-
-def _block_ads(route):
-    """Aborts requests to ad/tracker hosts, continues everything else."""
-    if any(host in route.request.url for host in AD_HOSTS):
-        return route.abort()
-    return route.continue_()
 
 
 def token_expired(url, margin=TOKEN_MARGIN_S):
@@ -268,17 +246,15 @@ def open_session(cfg):
             kwargs["proxy"] = {"server": PROXY_URL}
 
         context = pw.chromium.launch_persistent_context(profile, **kwargs)
-        context.route("**/*", _block_ads)
 
         seen = []
 
         def on_request(request):
             low = request.url.lower()
-            if any(h in low for h in STREAM_HINTS):
-                if "zeethirai" in low:
-                    seen.append(request.url)
-                    if len(seen) > SEEN_CAP:
-                        del seen[: SEEN_CAP // 2]
+            if any(h in low for h in STREAM_HINTS) and "zeethirai" in low:
+                seen.append(request.url)
+                if len(seen) > SEEN_CAP:
+                    del seen[: SEEN_CAP // 2]
 
         context.on("request", on_request)
 
@@ -379,6 +355,8 @@ def load_page(cfg):
 
 
 def pick(pattern, *groups):
+    """Returns the newest FRESH matching link. 'stale' only reports that expired links were seen,
+    for logging. It never triggers a page reload."""
     stale = False
     for group in groups:
         matches = [u for u in group if pattern.search(u) and "zeethirai" in u.lower()]
@@ -404,7 +382,7 @@ def capture_once(cfg):
 
         page = _session["page"]
         deadline = time.monotonic() + cfg["capture_timeout_s"]
-        reloaded_for_token = False
+        logged_stale = False
 
         while True:
             if not _session["clicked"]:
@@ -420,19 +398,16 @@ def capture_once(cfg):
                 _session["source_hits"] = scan_page_sources(page)
                 found, _ = pick(pattern, _session["store_hits"], _session["source_hits"])
 
-            if not found and stale and not reloaded_for_token:
-                reloaded_for_token = True
-                load_page(cfg)
-                deadline = max(deadline, time.monotonic() + cfg["capture_timeout_s"])
-                continue
-
             if found:
                 if found != _session["last_found"]:
                     print(f"[capture] Found ZeeThirai Stream: {found}", flush=True)
-                    print(f"[clearkey] Active Keys Loaded: {list(CLEARKEYS.keys())}", flush=True)
                     _session["last_found"] = found
                 set_stage("stream_found")
                 return found
+
+            if stale and not logged_stale:
+                logged_stale = True
+                print("[capture] expired ZeeThirai token seen, waiting for a fresh one", flush=True)
 
             if time.monotonic() >= deadline:
                 break
