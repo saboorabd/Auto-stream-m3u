@@ -1,11 +1,13 @@
 {
-  "page_url": "https://jjtvxweb.pages.dev/pind?id=3051",
+  "page_url": "https://giotv-6op.pages.dev/pind?id=3051",
   "channel_name": "Zee Thirai HD",
   "channel_id": "zeethirai",
   "channel_logo": "https://jiotvimages.cdn.jio.com/dare_images/images/ZeeThiraiHD.png",
   "channel_group": "Movies",
-  "referer": "https://jjtvxweb.pages.dev",
-  "user_agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36",
+  "referer": "https://giotv-6op.pages.dev",
+  "user_agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Mobile Safari/537.36",
+  "cookies": "OAID=0083e36c0d9f4153fa2fcf75f4f28a2b; oaidts=1793690271",
+  "drm_scheme": "widevine",
   "play_selectors": [
     "button.shaka-play-button[aria-label='Play']",
     ".shaka-big-play-button",
